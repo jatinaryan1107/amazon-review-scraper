@@ -1,0 +1,7 @@
+auth.json
+*.csv
+!input_urls.csv
+debug_review_*.html
+__pycache__/
+*.pyc
+.env
