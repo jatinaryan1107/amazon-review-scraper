@@ -1,6 +1,6 @@
-# Escape Plan Review Scraper
+# Amazon India Review Scraper
 
-Escape Plan Review Scraper is a browser-based Amazon India review scraper built for the Escape Plan assignment. It collects structured written reviews from selected product URLs and exports them to CSV for customer pain point analysis, category insights, and pricing simulation.
+A browser-based Amazon India review scraper that collects structured written reviews from selected product URLs and exports them to CSV for consumer pain-point analysis, category insights, and pricing simulation.
 
 ## What the Scraper Does
 
@@ -82,12 +82,10 @@ python scraper.py --scrape --pages 10 --output reviews_output.csv
 ## Example Commands
 
 ```bash
-python scraper.py --scrape --pages 10 --output kids_luggage_reviews.csv
-python scraper.py --scrape --pages 10 --output validation_products.csv
-python scraper.py --scrape --pages 10 --output kidsbags_0_3_main_reviews.csv
-python scraper.py --scrape --pages 10 --output kidsbags_0_3_validation_reviews.csv
-python scraper.py --scrape --pages 10 --output lunchbox_main_reviews.csv
-python scraper.py --scrape --pages 10 --output lunchbox_validation_reviews.csv
+python scraper.py --scrape --pages 10 --output category_a_reviews.csv
+python scraper.py --scrape --pages 10 --output category_a_validation.csv
+python scraper.py --scrape --pages 10 --output category_b_reviews.csv
+python scraper.py --scrape --pages 10 --output category_b_validation.csv
 ```
 
 ## Checking Output
@@ -141,9 +139,9 @@ Do not push `auth.json` because it contains local browser session state and may 
 
 ## Review Analysis Workflow
 
-The review analysis process used was:
+A typical review analysis process:
 
-1. Filter products by category from the source sheet.
+1. Filter products by category from the source data.
 2. Sort products by monthly revenue.
 3. Avoid duplicate variants and clusters.
 4. Select representative high-revenue products.
@@ -166,21 +164,11 @@ The review analysis process used was:
 
 ## Data Validation Note
 
-The source sheet’s `Reviews` column appeared closer to total rating count than the actual written review count. Written-review analysis was therefore based on scraped Amazon review text rather than directly relying on that sheet field.
-
-## Categories Analysed
-
-The current deep-dive analysis was done for:
-
-- Kids Luggage
-- Kids Bags (0-3 years)
-- Lunchbox
-
-This workflow can be extended to more categories by updating `input_urls.csv` and rerunning the scraper.
+A source sheet's `Reviews` column often reflects total rating count rather than actual written review count. Written-review analysis should therefore be based on scraped review text rather than relying directly on that field.
 
 ## Market Price Simulator
 
-A separate category-level market price simulator was built from:
+A separate category-level market price simulator can be built from:
 
 - product price
 - monthly sales
@@ -202,13 +190,11 @@ It should be interpreted as a category-level market signal simulator, not a SKU-
 
 ## Future Improvements
 
-Potential improvements include:
-
 - star-rating filters
 - keyword-based review filters
 - sort controls for recent, critical, or helpful reviews
 - automatic theme frequency counts
-- a review pain point dashboard
+- a review pain-point dashboard
 - more categories
 - SKU-level demand modelling with historical data
 - an interactive simulator dashboard
