@@ -12,6 +12,14 @@ from review_parser import detect_page_state, extract_asin, parse_reviews
 from review_store import ReviewStore
 
 
+class SafeNavigationError(ValueError):
+    """An adapter validation failure with deliberately nonsecret diagnostics."""
+
+    def __init__(self, message, diagnostic):
+        super().__init__(message)
+        self.diagnostic = dict(diagnostic)
+
+
 @dataclass(frozen=True)
 class PageSnapshot:
     url: str
@@ -89,6 +97,7 @@ def collect_product(
     inserted = 0
     processed = 0
     fingerprints = set()
+    diagnostic = None
     durable_position = (cursor_url, cursor_steps, pages_completed)
 
     def restore_committed_position():
@@ -116,18 +125,24 @@ def collect_product(
         if on_progress is not None:
             # Reporting observes committed state and cannot invalidate a saved page.
             try:
-                on_progress({"asin": asin, "status": status, "detail": detail,
-                             "inserted": inserted, "pages_processed": processed,
-                             "pages_completed": pages_completed})
+                event = {"asin": asin, "status": status, "detail": detail,
+                         "inserted": inserted, "pages_processed": processed,
+                         "pages_completed": pages_completed}
+                if diagnostic is not None:
+                    event["diagnostic"] = dict(diagnostic)
+                on_progress(event)
             except Exception:
                 pass
         return counts
 
     def result(status: str, detail: str) -> dict:
-        return {
+        report = {
             "asin": asin, "status": status, "skipped": False,
             "inserted": inserted, "pages_processed": processed, "detail": detail,
         }
+        if diagnostic is not None:
+            report["diagnostic"] = dict(diagnostic)
+        return report
 
     def cancellation():
         if cancelled is None or not cancelled():
@@ -260,10 +275,14 @@ def collect_product(
         status = "blocked" if http_status in {403, 429} else "failed"
         # Browser request diagnostics can include authenticated request headers.
         # Only public failure information belongs in checkpoints or UI events.
-        detail = (f"Amazon returned HTTP {http_status}; collection stopped for access review."
-                  if status == "blocked" else
-                  f"{type(exc).__name__}: Collection could not save the next page. "
-                  "The saved cursor is retained. Check the browser setup or retry later.")
+        if isinstance(exc, SafeNavigationError):
+            detail = str(exc)
+            diagnostic = dict(exc.diagnostic)
+        else:
+            detail = (f"Amazon returned HTTP {http_status}; collection stopped for access review."
+                      if status == "blocked" else
+                      f"{type(exc).__name__}: Collection could not save the next page. "
+                      "The saved cursor is retained. Check the browser setup or retry later.")
         save(status, detail)
         return result(status, detail)
 

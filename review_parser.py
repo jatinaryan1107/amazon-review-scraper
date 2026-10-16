@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
-from review_store import make_review_id
+from review_store import PORTAL_REVIEW_PATH, make_review_id
 
 
 _VOID_TAGS = {
@@ -117,7 +117,8 @@ def extract_asin(url: str) -> str | None:
 
     Only the exact amazon.in and www.amazon.in hosts are accepted. Credentials,
     explicit ports, lookalike hosts and loose ten-character text are rejected.
-    A product's optional readable slug before ``/dp/`` is supported.
+    A product's optional readable slug before ``/dp/`` is supported. Amazon's
+    portal review pagination route allows only an optional reference suffix.
     """
     if (not isinstance(url, str) or not url
             or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in url)):
@@ -130,6 +131,9 @@ def extract_asin(url: str) -> str | None:
         return None
     if parsed.netloc.lower() not in {"amazon.in", "www.amazon.in"}:
         return None
+    portal = PORTAL_REVIEW_PATH.fullmatch(parsed.path)
+    if portal:
+        return portal.group(1).upper()
     match = re.match(
         r"^/(?:[^/]+/)?(?:dp|product-reviews)/([A-Z0-9]{10})(?:/|$)",
         parsed.path,

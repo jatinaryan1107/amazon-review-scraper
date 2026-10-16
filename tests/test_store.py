@@ -95,6 +95,29 @@ class ReviewStoreTests(unittest.TestCase):
             self.assertEqual(store.list_checkpoints()[0]["replay_steps"], 0)
             self.assertIsNone(store.get_checkpoint(SECOND_ASIN))
 
+    def test_portal_review_cursor_is_saved_and_restored(self):
+        portal = f"https://www.amazon.in/portal/customer-reviews/{ASIN}/ref=cm_cr_arp_d_paging_btm_2?pageNumber=2"
+        with ReviewStore(self.database) as store:
+            counts = store.save_page(ASIN, [review()], next_url=portal, pages_completed=1, status="paused")
+            self.assertEqual(counts["inserted"], 1)
+        with ReviewStore(self.database, read_only=True) as store:
+            self.assertEqual(store.get_checkpoint(ASIN)["next_url"], portal)
+
+    def test_portal_cursor_rejects_different_product_origin_and_path_tricks(self):
+        base = f"https://www.amazon.in/portal/customer-reviews/{ASIN}"
+        invalid = [base.replace(ASIN, SECOND_ASIN), base.replace("www.amazon.in", "amazon.in.evil.test"),
+                   base.replace("https:", "http:"), base.replace("www.amazon.in", "user:password@www.amazon.in"),
+                   base.replace("www.amazon.in", "www.amazon.in:443"),
+                   base.replace("/portal/", "/prefix/portal/"), base + "EXTRA", base + "/extra",
+                   base + "/ref=", base + "/ref=valid/extra", base + "/ref=bad%2Fextra",
+                   base.replace("/portal/", "/portal%2F"), base + f"/dp/{ASIN}"]
+        with ReviewStore(self.database) as store:
+            for cursor in invalid:
+                with self.subTest(cursor=cursor), self.assertRaises(ValueError):
+                    store.save_page(ASIN, [review()], next_url=cursor, pages_completed=1, status="paused")
+            self.assertEqual(store.summary()["total_reviews"], 0)
+            self.assertIsNone(store.get_checkpoint(ASIN))
+
     def test_export_round_trips_unicode_quoted_text_and_newlines(self):
         body = 'बहुत अच्छा, "excellent"!\nSecond line with café.'
         with ReviewStore(self.database) as store:

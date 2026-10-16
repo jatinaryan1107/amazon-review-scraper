@@ -41,6 +41,10 @@ _PRODUCT_PATH = re.compile(
     r"/(?:dp|gp/product|gp/aw/d|product-reviews)/([A-Z0-9]{10})(?:/|$)",
     re.ASCII,
 )
+PORTAL_REVIEW_PATH = re.compile(
+    r"/portal/customer-reviews/([A-Z0-9]{10})(?:/ref=[A-Z0-9_-]{1,200})?/?\Z",
+    re.IGNORECASE | re.ASCII,
+)
 
 
 def _text(value: Any, field: str) -> str:
@@ -73,8 +77,14 @@ def _amazon_url(value: Any, asin: str, field: str) -> str:
         or port is not None
     ):
         raise ValueError(f"{field} must be an HTTPS Amazon.in product or review URL")
-    match = _PRODUCT_PATH.search(unquote(parsed.path))
-    if not match or match.group(1) != asin:
+    decoded_path = unquote(parsed.path)
+    if decoded_path.casefold().startswith("/portal/customer-reviews"):
+        # Portal pagination has a narrow route and an optional reference suffix.
+        # Match the original path so encoded separators cannot widen the route.
+        match = PORTAL_REVIEW_PATH.fullmatch(parsed.path)
+    else:
+        match = _PRODUCT_PATH.search(decoded_path)
+    if not match or match.group(1).upper() != asin:
         raise ValueError(f"{field} must refer to ASIN {asin}")
     return result
 

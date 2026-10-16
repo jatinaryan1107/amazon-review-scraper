@@ -9,8 +9,9 @@ import time
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
-from collector import PageSnapshot
+from collector import PageSnapshot, SafeNavigationError
 from review_parser import detect_page_state, extract_asin
+from review_store import PORTAL_REVIEW_PATH
 
 
 NEXT_SELECTORS = (
@@ -60,6 +61,33 @@ def _amazon_location(url):
 
 def _document_url(url):
     return urlsplit(url)._replace(fragment="").geturl()
+
+
+def _navigation_error(message, url, state, expected_asin):
+    """Describe known routes without copying arbitrary URL components."""
+    origin, path = "unavailable", "unavailable"
+    actual_asin = extract_asin(url)
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme in {"https", "http"} and parsed.hostname:
+            host = parsed.hostname.lower()
+            port = f":{parsed.port}" if parsed.port is not None else ""
+            origin = f"{parsed.scheme}://{host}{port}"[:200]
+            path = "/<unrecognized>"
+            if actual_asin is not None:
+                normalized_path = parsed.path.lower()
+                if normalized_path.startswith("/portal/customer-reviews/"):
+                    path = f"/portal/customer-reviews/{actual_asin}"
+                elif "/product-reviews/" in normalized_path:
+                    path = f"/product-reviews/{actual_asin}"
+                else:
+                    path = f"/dp/{actual_asin}"
+    except (TypeError, ValueError):
+        pass
+    return SafeNavigationError(message, {
+        "origin": origin, "path": path, "detected_state": state,
+        "expected_asin": expected_asin, "actual_asin": actual_asin,
+    })
 
 
 class PlaywrightBrowser:
@@ -136,11 +164,11 @@ class PlaywrightBrowser:
     def _validate_location(self, state):
         current_asin = extract_asin(self.page.url)
         if not _amazon_location(self.page.url):
-            raise ValueError("Browser left the allowed HTTPS Amazon.in origin.")
+            raise _navigation_error("Browser left the allowed HTTPS Amazon.in origin.", self.page.url, state, self._asin)
         if current_asin is not None and current_asin != self._asin:
-            raise ValueError("Browser navigated to a different Amazon.in product.")
+            raise _navigation_error("Browser navigated to a different Amazon.in product.", self.page.url, state, self._asin)
         if current_asin is None and state not in {"login", "captcha"}:
-            raise ValueError("Browser did not reach the requested Amazon.in product.")
+            raise _navigation_error("Browser did not reach the requested Amazon.in product.", self.page.url, state, self._asin)
 
     def _snapshot(self):
         self._next, self._next_url = None, None
@@ -175,7 +203,11 @@ class PlaywrightBrowser:
             return None
         next_url = urljoin(self.page.url, href)
         if extract_asin(next_url) != self._asin:
-            raise ValueError("Next control points outside the current Amazon.in product.")
+            raise _navigation_error("Next control points outside the current Amazon.in product.", next_url, "success", self._asin)
+        if PORTAL_REVIEW_PATH.fullmatch(urlsplit(next_url).path):
+            # A portal reference link is not a proven durable page cursor. Use
+            # the rendered control and retain the base plus replay count.
+            return None
         return None if _document_url(next_url) == _document_url(self.page.url) else next_url
 
     def _wait_for_content(self):
@@ -210,7 +242,7 @@ class PlaywrightBrowser:
         """Load one product page; retry timeouts but stop at login or CAPTCHA."""
         asin = extract_asin(url)
         if asin is None:
-            raise ValueError("Refusing to navigate to an invalid product/review URL.")
+            raise _navigation_error("Refusing to navigate to an invalid product/review URL.", url, "not_loaded", None)
         self._asin = asin
         self._next, self._next_url = None, None
         self._blocked_status = None
@@ -258,7 +290,7 @@ class PlaywrightBrowser:
         self._next, self._next_url = None, None
         if next_url is not None:
             if extract_asin(next_url) != self._asin:
-                raise ValueError("Next link refers to a different product.")
+                raise _navigation_error("Next link refers to a different product.", next_url, state, self._asin)
             return self.load(next_url)
         before = self.page.locator('[data-hook="review"]').all_text_contents()
         self._pause()
@@ -348,14 +380,14 @@ class HTTPFirstBrowser:
     def load(self, url):
         asin = extract_asin(url)
         if asin is None:
-            raise ValueError("Refusing to request an invalid Amazon.in review URL.")
+            raise _navigation_error("Refusing to request an invalid Amazon.in review URL.", url, "not_loaded", None)
         self._browser_mode = False
         self._next_url = None
         current = url
         visited = set()
         for redirect in range(4):
             if current in visited:
-                raise ValueError("Review request repeated a redirect; stopped.")
+                raise _navigation_error("Review request repeated a redirect; stopped.", current, "redirect", asin)
             visited.add(current)
             self.pacer()
             response = self.request.get(
@@ -363,7 +395,7 @@ class HTTPFirstBrowser:
             )
             try:
                 if not _amazon_location(response.url):
-                    raise ValueError("Review response left the allowed Amazon.in origin.")
+                    raise _navigation_error("Review response left the allowed Amazon.in origin.", response.url, "response", asin)
                 status = response.status
                 headers = {key.lower(): value for key, value in response.headers.items()}
                 if status in {403, 429}:
@@ -372,19 +404,19 @@ class HTTPFirstBrowser:
                     location = headers.get("location")
                     target = urljoin(current, location or "")
                     if not location or not _amazon_location(target):
-                        raise ValueError("Review redirect left the allowed Amazon.in origin.")
+                        raise _navigation_error("Review redirect left the allowed Amazon.in origin.", target, "redirect", asin)
                     if urlsplit(target).path.startswith("/ap/signin"):
                         return PageSnapshot(target, '<input id="ap_email">', "Amazon Sign-In")
                     if extract_asin(target) != asin:
-                        raise ValueError("Review redirect points outside the requested product.")
+                        raise _navigation_error("Review redirect points outside the requested product.", target, "redirect", asin)
                     if redirect == 3:
-                        raise ValueError("Review request exceeded the redirect limit.")
+                        raise _navigation_error("Review request exceeded the redirect limit.", target, "redirect", asin)
                     current = target
                     continue
                 if status >= 400 or status < 200 or status >= 300:
                     raise RuntimeError(f"Amazon returned HTTP {status}; collection stopped.")
                 if extract_asin(response.url) != asin:
-                    raise ValueError("Review response refers to a different product.")
+                    raise _navigation_error("Review response refers to a different product.", response.url, "response", asin)
                 content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
                 if content_type not in {"text/html", "application/xhtml+xml"}:
                     raise ValueError("Review response was not an HTML document.")
@@ -413,7 +445,9 @@ class HTTPFirstBrowser:
                     return self._fallback(response_url)
                 target = urljoin(response_url, href.strip())
                 if extract_asin(target) != asin:
-                    raise ValueError("Next control points outside the current Amazon.in product.")
+                    raise _navigation_error("Next control points outside the current Amazon.in product.", target, state, asin)
+                if PORTAL_REVIEW_PATH.fullmatch(urlsplit(target).path):
+                    return self._fallback(response_url)
                 if _document_url(target) == _document_url(response_url):
                     return self._fallback(response_url)
                 self._next_url = target

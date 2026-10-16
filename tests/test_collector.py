@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from collector import PageSnapshot, collect_product, load_input_urls
+from collector import PageSnapshot, SafeNavigationError, collect_product, load_input_urls
 from review_store import ReviewStore
 
 
@@ -83,6 +83,34 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(report["inserted"], 0)
         self.assertEqual(self.store.summary()["total_reviews"], 1)
         self.assertEqual(self.store.get_checkpoint(ASIN)["pages_completed"], 1)
+
+    def test_portal_pagination_commits_first_page_and_resumes_saved_cursor(self):
+        portal = f"https://www.amazon.in/portal/customer-reviews/{ASIN}/ref=cm_cr_arp_d_paging_btm_2?pageNumber=2"
+        first = collect_product(FakeBrowser([PageSnapshot(FIRST, html(), has_next=True, next_url=portal)]),
+                                self.store, PRODUCT, max_pages=1)
+        self.assertEqual((first["status"], first["inserted"]), ("paused", 1))
+        self.assertEqual(self.store.get_checkpoint(ASIN)["next_url"], portal)
+        browser = FakeBrowser([PageSnapshot(portal, html("DEMO-R2"))])
+        resumed = collect_product(browser, self.store, PRODUCT, resume=True)
+        self.assertEqual(resumed["status"], "complete")
+        self.assertEqual(browser.loads, [portal])
+        self.assertEqual(self.store.summary()["total_reviews"], 2)
+
+    def test_rendered_portal_pagination_saves_base_and_replays_to_resume(self):
+        portal2 = f"https://www.amazon.in/portal/customer-reviews/{ASIN}/ref=cm_cr_arp_d_paging_btm_2"
+        portal3 = f"https://www.amazon.in/portal/customer-reviews/{ASIN}/ref=cm_cr_arp_d_paging_btm_3"
+        first = PageSnapshot(FIRST, html(), has_next=True)
+        second = PageSnapshot(portal2, html("DEMO-R2"), has_next=True)
+        report = collect_product(FakeBrowser([first, second]), self.store, PRODUCT, max_pages=2)
+        self.assertEqual((report["status"], report["inserted"], report["pages_processed"]), ("paused", 2, 2))
+        checkpoint = self.store.get_checkpoint(ASIN)
+        self.assertEqual((checkpoint["next_url"], checkpoint["replay_steps"]), (FIRST, 2))
+        browser = FakeBrowser([first, second, PageSnapshot(portal3, html("DEMO-R3"))])
+        resumed = collect_product(browser, self.store, PRODUCT, resume=True, max_pages=1)
+        self.assertEqual(resumed["status"], "complete")
+        self.assertEqual(browser.loads, [FIRST])
+        self.assertEqual(browser.advances, 2)
+        self.assertEqual(self.store.summary()["total_reviews"], 3)
 
     def test_ajax_resume_replays_then_processes_saved_position(self):
         initial = PageSnapshot(FIRST, html(), has_next=True)
@@ -267,6 +295,17 @@ class CollectorTests(unittest.TestCase):
         self.assertNotIn(private, report["detail"])
         self.assertNotIn(private, self.store.get_checkpoint(ASIN)["detail"])
         self.assertTrue(all(private not in event["detail"] for event in events))
+
+    def test_safe_navigation_diagnostic_is_structured_and_checkpoint_stays_readable(self):
+        diagnostic = {"origin": "https://www.amazon.in", "path": "/unexpected-route",
+                      "detected_state": "unknown", "expected_asin": ASIN, "actual_asin": None}
+        error = SafeNavigationError("Browser did not reach the requested Amazon.in product.", diagnostic)
+        events = []
+        report = collect_product(FakeBrowser([error]), self.store, PRODUCT, on_progress=events.append)
+        self.assertEqual(report["diagnostic"], diagnostic)
+        self.assertEqual(events[-1]["diagnostic"], diagnostic)
+        self.assertEqual(self.store.get_checkpoint(ASIN)["detail"], str(error))
+        self.assertNotIn("detected_state", self.store.get_checkpoint(ASIN)["detail"])
 
     def test_live_entry_point_syntax_without_executing_it(self):
         source = Path(__file__).resolve().parents[1] / "scraper.py"

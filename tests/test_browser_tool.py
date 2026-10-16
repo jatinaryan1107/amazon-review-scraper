@@ -220,6 +220,39 @@ class BrowserToolTests(unittest.TestCase):
         self.assertEqual([call[0] for call in self.page.loads], [FIRST, SECOND])
         self.assertEqual(control.clicks, [])
 
+    def test_portal_review_pagination_keeps_the_same_product(self):
+        portal = f"https://www.amazon.in/portal/customer-reviews/{ASIN}/ref=cm_cr_arp_d_paging_btm_2"
+        control = FakeControl(portal, on_click=lambda: setattr(self.page, "url", portal))
+        self.page.controls[NEXT_SELECTORS[0]] = [control]
+        tool = self.tool()
+        self.assertIsNone(tool.load(FIRST).next_url)
+
+        def finish_rendered_update():
+            self.page.html = review_html("Another fictional review")
+            self.page.texts = ["Another fictional review"]
+            self.page.controls = {}
+
+        self.page.change_callback = finish_rendered_update
+        self.assertEqual(tool.advance().url, portal)
+        self.assertEqual(len(control.clicks), 1)
+        self.assertEqual([call[0] for call in self.page.loads], [FIRST])
+        self.page = FakePage()
+        self.page.controls[NEXT_SELECTORS[0]] = [FakeControl(portal.replace(ASIN, "B0DEMO0002"))]
+        with self.assertRaisesRegex(ValueError, "outside the current"):
+            self.tool().load(FIRST)
+
+    def test_portal_url_change_without_changed_reviews_is_not_progress(self):
+        portal = f"https://www.amazon.in/portal/customer-reviews/{ASIN}/ref=cm_cr_arp_d_paging_btm_2"
+        control = FakeControl(portal, on_click=lambda: setattr(self.page, "url", portal))
+        self.page.controls[NEXT_SELECTORS[0]] = [control]
+        tool = self.tool(timeout_ms=500)
+        tool.load(FIRST)
+        with self.assertRaises(FakeTimeout):
+            tool.advance()
+        self.assertEqual(len(control.clicks), 1)
+        self.assertEqual(len(self.page.loads), 1)
+        self.assertIsNone(tool.advance())
+
     def test_ajax_click_waits_for_actual_changed_reviews_once(self):
         control = FakeControl("#more")
         self.page.controls[NEXT_SELECTORS[-1]] = [control]
@@ -360,6 +393,28 @@ class BrowserToolTests(unittest.TestCase):
             tool.advance()
         self.assertEqual(control.clicks, [])
 
+    def test_navigation_diagnostic_omits_query_fragment_user_info_and_page_content(self):
+        private = "SYNTHETIC-PRIVATE-TOKEN"
+        self.page.goto_actions = [{"url": f"https://user:{private}@www.amazon.in/unexpected-route/{private}?token={private}#{private}",
+                                   "html": f"<h1>{private}</h1>", "heading": private}]
+        with self.assertRaises(browser_tool.SafeNavigationError) as caught:
+            self.tool().load(FIRST)
+        diagnostic = caught.exception.diagnostic
+        self.assertEqual(diagnostic, {"origin": "https://www.amazon.in", "path": "/<unrecognized>",
+                                     "detected_state": "unknown", "expected_asin": ASIN, "actual_asin": None})
+        self.assertNotIn(private, str(caught.exception))
+        self.assertNotIn(private, str(diagnostic))
+        for url, path in [
+            (f"https://www.amazon.in/{private}/dp/{ASIN}/ref={private}", f"/dp/{ASIN}"),
+            (f"https://www.amazon.in/product-reviews/{ASIN}/ref={private}", f"/product-reviews/{ASIN}"),
+            (f"https://www.amazon.in/portal/customer-reviews/{ASIN}/ref={private}", f"/portal/customer-reviews/{ASIN}"),
+            (f"https://example.com/{private}/dp/{ASIN}", "/<unrecognized>"),
+        ]:
+            with self.subTest(url=url):
+                error = browser_tool._navigation_error("Navigation stopped.", url, "unknown", ASIN)
+                self.assertEqual(error.diagnostic["path"], path)
+                self.assertNotIn(private, str(error.diagnostic))
+
     def test_content_wait_timeout_preserves_unknown_instead_of_zero_reviews(self):
         self.page.html = "<h1>Unrecognized content</h1>"
         self.page.ready_timeout = True
@@ -425,6 +480,25 @@ class HybridBrowserTests(unittest.TestCase):
         snapshot = tool.load(FIRST)
         self.assertTrue(snapshot.has_next)
         self.assertEqual(snapshot.next_url, SECOND)
+        self.assertEqual([call[0] for call in self.page.loads], [FIRST])
+
+    def test_portal_html_next_uses_browser_click_instead_of_requesting_reference_url(self):
+        portal = f"https://www.amazon.in/portal/customer-reviews/{ASIN}/ref=cm_cr_arp_d_paging_btm_2"
+        response = FakeHTTPResponse(html=review_html() + f'<li class="a-last"><a href="{portal}">Next</a></li>')
+        tool = self.tool([response])
+        control = FakeControl(portal)
+        self.page.controls[NEXT_SELECTORS[0]] = [control]
+        self.assertIsNone(tool.load(FIRST).next_url)
+
+        def finish_update():
+            self.page.html = review_html("Second fictional review")
+            self.page.texts = ["Second fictional review"]
+            self.page.controls = {}
+
+        self.page.change_callback = finish_update
+        self.assertIn("Second fictional review", tool.advance().html)
+        self.assertEqual(len(control.clicks), 1)
+        self.assertEqual([call[0] for call in self.request.calls], [FIRST])
         self.assertEqual([call[0] for call in self.page.loads], [FIRST])
 
     def test_unknown_html_and_javascript_pagination_fall_back_at_same_url(self):

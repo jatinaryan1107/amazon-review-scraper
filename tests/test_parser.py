@@ -91,6 +91,31 @@ class ReviewParserTests(unittest.TestCase):
 
 
 class AsinTests(unittest.TestCase):
+    def test_portal_customer_review_pagination_route(self):
+        actual_route = "https://www.amazon.in/portal/customer-reviews/B0CGDZC2FK/ref=cm_cr_arp_d_paging_btm_2"
+        self.assertEqual(extract_asin(actual_route), "B0CGDZC2FK")
+        for suffix in ["", "/", "/ref=cm_cr_arp_d_paging_btm_2", "/ref=cm_cr_arp_d_paging_btm_2/?pageNumber=2"]:
+            with self.subTest(suffix=suffix):
+                self.assertEqual(extract_asin(f"https://amazon.in/portal/customer-reviews/{ASIN}{suffix}"), ASIN)
+
+    def test_portal_route_keeps_exact_origin_and_path_boundaries(self):
+        for url in [
+            f"https://amazon.in.evil.example/portal/customer-reviews/{ASIN}",
+            f"http://www.amazon.in/portal/customer-reviews/{ASIN}",
+            f"https://user:password@www.amazon.in/portal/customer-reviews/{ASIN}",
+            f"https://www.amazon.in:443/portal/customer-reviews/{ASIN}",
+            f"https://www.amazon.in/prefix/portal/customer-reviews/{ASIN}",
+            f"https://www.amazon.in/portal/customer-reviews/{ASIN}EXTRA",
+            f"https://www.amazon.in/portal/customer-reviews/{ASIN}/extra",
+            f"https://www.amazon.in/portal/customer-reviews/{ASIN}/ref=",
+            f"https://www.amazon.in/portal/customer-reviews/{ASIN}/ref=valid/extra",
+            f"https://www.amazon.in/portal/customer-reviews/{ASIN}/ref=bad%2Fextra",
+            f"https://www.amazon.in/portal%2Fcustomer-reviews/{ASIN}",
+            f"https://www.amazon.in/portal/customer-reviews/{ASIN}/dp/{ASIN}",
+        ]:
+            with self.subTest(url=url):
+                self.assertIsNone(extract_asin(url))
+
     def test_supported_amazon_in_paths(self):
         for url in [
             PRODUCT_URL,
