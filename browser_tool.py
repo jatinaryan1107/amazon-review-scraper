@@ -9,7 +9,7 @@ import time
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
-from collector import PageSnapshot, SafeNavigationError
+from collector import PageHTTPError, PageSnapshot, SafeNavigationError
 from review_parser import detect_page_state, extract_asin
 from review_store import PORTAL_REVIEW_PATH
 
@@ -26,8 +26,16 @@ _CONTENT_READY = """() => document.querySelector(
     || /no customer reviews|robot check|captcha|sign.in/i.test(
         document.title + ' ' + (document.body?.innerText || ''))"""
 
+_REVIEW_IDENTITIES = """nodes => Array.from(new Set(nodes.map(node => {
+    const id = node.getAttribute('id') || node.getAttribute('data-review-id');
+    return id ? 'id:' + id : 'text:' + node.textContent;
+}))).sort()"""
+
 _REVIEW_CHANGE = """before => {
-    const reviews = Array.from(document.querySelectorAll('[data-hook="review"]'), node => node.textContent);
+    const reviews = Array.from(new Set(Array.from(document.querySelectorAll('[data-hook="review"]'), node => {
+        const id = node.getAttribute('id') || node.getAttribute('data-review-id');
+        return id ? 'id:' + id : 'text:' + node.textContent;
+    }))).sort();
     const blocked = document.querySelector('input#ap_email, input#captchacharacters')
         || /robot check|captcha|sign.in/i.test(document.title);
     const empty = document.querySelector('[data-hook="no-reviews-section"]')
@@ -254,17 +262,20 @@ class PlaywrightBrowser:
                 if response is not None and response.status in {403, 429}:
                     self._next, self._next_url = None, None
                     raise AccessBlockedError(response.status)
+                if response is not None and response.status >= 400:
+                    if not _amazon_location(self.page.url):
+                        raise _navigation_error("Browser left the allowed HTTPS Amazon.in origin.", self.page.url, "unknown", self._asin)
+                    block = self._access_block()
+                    if block is not None:
+                        return block
+                    self._next, self._next_url = None, None
+                    raise PageHTTPError(response.status)
                 self._wait_for_content()
                 self._raise_access_block()
                 snapshot = self._snapshot()
                 self.metrics["browser_pages"] = self.metrics.get("browser_pages", 0) + 1
                 if detect_page_state(snapshot.html, snapshot.title)[0] in {"login", "captcha"}:
                     return snapshot
-                if response is not None and response.status >= 400:
-                    self._next, self._next_url = None, None
-                    if response.status in {403, 429}:
-                        raise AccessBlockedError(response.status)
-                    raise RuntimeError(f"Amazon returned HTTP {response.status}; collection stopped.")
                 return snapshot
             except self._timeout_error:
                 self._raise_access_block()
@@ -292,7 +303,7 @@ class PlaywrightBrowser:
             if extract_asin(next_url) != self._asin:
                 raise _navigation_error("Next link refers to a different product.", next_url, state, self._asin)
             return self.load(next_url)
-        before = self.page.locator('[data-hook="review"]').all_text_contents()
+        before = self.page.locator('[data-hook="review"]').evaluate_all(_REVIEW_IDENTITIES)
         self._pause()
         try:
             control.click(timeout=self.timeout_ms)
@@ -414,7 +425,7 @@ class HTTPFirstBrowser:
                     current = target
                     continue
                 if status >= 400 or status < 200 or status >= 300:
-                    raise RuntimeError(f"Amazon returned HTTP {status}; collection stopped.")
+                    raise PageHTTPError(status)
                 if extract_asin(response.url) != asin:
                     raise _navigation_error("Review response refers to a different product.", response.url, "response", asin)
                 content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()

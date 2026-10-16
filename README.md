@@ -78,6 +78,24 @@ Login screens, CAPTCHA, and HTTP 403 or 429 stop the batch. Resolve access manua
 
 Jobs and reports persist in `data/jobs.sqlite3`. A server restart marks unfinished jobs interrupted. It does not silently restart collection or paid analysis. Start a new job with Continue saved progress to resume. Reports remain available after a restart and are marked stale when their source review content changes.
 
+## Larger collection attempts
+
+For an explicitly chosen larger target, keep Reviewdesk running and start the campaign driver in another terminal:
+
+```powershell
+python bulk_collect.py reviewed-products.json --target 5000 --budget-minutes 45 --max-pages 1000
+```
+
+The UTF-8 JSON manifest contains a `products` array. Each entry needs `asin` and `product_url` (or `url`), with optional `title` and an HTTPS Amazon.in `source_url` for provenance. Supply real product links you have reviewed; the driver does not discover products. It accepts at most 100 distinct products and a target from one to 5,000 distinct live review IDs.
+
+Collection uses the existing local API, browser session, and page limits: at most ten products and five new pages per product in each job. Completed products are skipped, paused products rotate through subsequent jobs, and existing replay limits remain enforced. The target counts review IDs once across the selected products, so reviews shared by colour variants do not inflate it. Reviewdesk's review count can be higher because the database preserves each product's source rows. The target is checked between jobs, so a final job can take the count above the requested number.
+
+The default time budget is 45 minutes, with a maximum of 60. The total new-page budget is at most 1,000; restoring earlier positions can require additional requests. A failed or partial product, an access block, two consecutive batches without new review IDs, or an exhausted budget stops the campaign. Existing failed, partial, or blocked checkpoints require review before another campaign starts. The driver never retries an uncertain job submission. Interrupting it requests cancellation only for its own active job. A restart requires an explicit new invocation.
+
+Progress journals are saved atomically under `data/campaigns/`, which is ignored by Git. These record the selected products, submitted job IDs, distinct counts, and the reason collection stopped. A 5,000-review target does not establish that Amazon will expose 5,000 written reviews. A large rating count is not a written-review count, and a missing Next control does not establish complete coverage.
+
+Automatic analysis remains the free local method. The optional OpenAI adapter still analyses a disclosed bounded sample, not all 5,000 review texts. A separate human-reviewed or chat-produced report should state exactly which texts were analysed and preserve source review IDs.
+
 ## What local analysis can tell you
 
 Local analysis calculates averages and rating groups from all stored reviews in the selected scope. Missing ratings remain separate. It scans English keywords for topics such as battery, noise, price, delivery, and support, counts each matching review once per topic, and keeps exact excerpts linked to the original product and review ID. A review may match several topics.

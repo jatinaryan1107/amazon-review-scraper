@@ -20,6 +20,16 @@ class SafeNavigationError(ValueError):
         self.diagnostic = dict(diagnostic)
 
 
+class PageHTTPError(RuntimeError):
+    """A known page response failure containing only a validated HTTP status."""
+
+    def __init__(self, status):
+        if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
+            raise ValueError("HTTP status must be a valid three-digit integer.")
+        self.http_status = status
+        super().__init__(f"Amazon returned HTTP {status}; collection stopped.")
+
+
 @dataclass(frozen=True)
 class PageSnapshot:
     url: str
@@ -98,6 +108,7 @@ def collect_product(
     processed = 0
     fingerprints = set()
     diagnostic = None
+    http_status = None
     durable_position = (cursor_url, cursor_steps, pages_completed)
 
     def restore_committed_position():
@@ -130,6 +141,8 @@ def collect_product(
                          "pages_completed": pages_completed}
                 if diagnostic is not None:
                     event["diagnostic"] = dict(diagnostic)
+                if http_status is not None:
+                    event["http_status"] = http_status
                 on_progress(event)
             except Exception:
                 pass
@@ -142,6 +155,8 @@ def collect_product(
         }
         if diagnostic is not None:
             report["diagnostic"] = dict(diagnostic)
+        if http_status is not None:
+            report["http_status"] = http_status
         return report
 
     def cancellation():
@@ -187,6 +202,17 @@ def collect_product(
                 detail = "Cannot restore saved show-more position: " + detail
                 save("failed", detail)
                 return result("failed", detail)
+            restored_rows = parse_reviews(snapshot.html, asin, product_url)
+            if not restored_rows:
+                detail = "Cannot restore saved position because no review identities were extracted."
+                save("failed", detail)
+                return result("failed", detail)
+            restored_fingerprint = tuple(sorted({str(row["review_id"]) for row in restored_rows}))
+            if restored_fingerprint in fingerprints:
+                detail = "Restoring saved position repeated the same review set; saved progress was not advanced."
+                save("partial", detail)
+                return result("partial", detail)
+            fingerprints.add(restored_fingerprint)
             snapshot = browser.advance()
             if snapshot is None:
                 detail = "Saved show-more position no longer exists. Restart to inspect changed content."
@@ -220,7 +246,7 @@ def collect_product(
                 detail = "Review elements were detected but no rows could be extracted."
                 save("failed", detail)
                 return result("failed", detail)
-            fingerprint = tuple(sorted(str(row["review_id"]) for row in rows))
+            fingerprint = tuple(sorted({str(row["review_id"]) for row in rows}))
             if fingerprint in fingerprints:
                 detail = "Pagination repeated the same review set; stopped with partial coverage."
                 save("partial", detail)
@@ -271,13 +297,18 @@ def collect_product(
         stopped = cancellation()
         if stopped:
             return stopped
-        http_status = getattr(exc, "http_status", None)
+        candidate_status = getattr(exc, "http_status", None)
+        valid_status = type(candidate_status) is int and 100 <= candidate_status <= 599
+        http_status = (candidate_status if valid_status and (isinstance(exc, PageHTTPError)
+                       or candidate_status in {403, 429}) else None)
         status = "blocked" if http_status in {403, 429} else "failed"
         # Browser request diagnostics can include authenticated request headers.
         # Only public failure information belongs in checkpoints or UI events.
         if isinstance(exc, SafeNavigationError):
             detail = str(exc)
             diagnostic = dict(exc.diagnostic)
+        elif isinstance(exc, PageHTTPError) and http_status is not None:
+            detail = f"Amazon returned HTTP {http_status}; collection stopped. The saved cursor is retained."
         else:
             detail = (f"Amazon returned HTTP {http_status}; collection stopped for access review."
                       if status == "blocked" else

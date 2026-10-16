@@ -52,9 +52,10 @@ class FakeControl:
 
 
 class FakeLocator:
-    def __init__(self, controls=(), texts=()):
+    def __init__(self, controls=(), texts=(), review_ids=None):
         self.controls = controls
         self.texts = texts
+        self.review_ids = review_ids
 
     def count(self):
         return len(self.controls)
@@ -64,6 +65,11 @@ class FakeLocator:
 
     def all_text_contents(self):
         return list(self.texts)
+
+    def evaluate_all(self, expression):
+        if self.review_ids is not None:
+            return sorted({"id:" + value for value in self.review_ids})
+        return sorted({"text:" + value for value in self.texts})
 
 
 class FakeResponse:
@@ -81,6 +87,7 @@ class FakePage:
         self.html = review_html()
         self.heading = "Synthetic reviews"
         self.texts = ["First fictional review"]
+        self.review_ids = None
         self.controls = {}
         self.loads = []
         self.goto_actions = []
@@ -117,7 +124,7 @@ class FakePage:
 
     def locator(self, selector):
         if selector == '[data-hook="review"]':
-            return FakeLocator(texts=self.texts)
+            return FakeLocator(texts=self.texts, review_ids=self.review_ids)
         return FakeLocator(self.controls.get(selector, ()))
 
     def wait_for_function(self, expression, *, timeout, arg=None):
@@ -129,7 +136,8 @@ class FakePage:
         if self.change_callback:
             self.change_callback()
         blocked = 'id="ap_email"' in self.html or 'id="captchacharacters"' in self.html
-        if not blocked and (not self.texts or self.texts == arg):
+        identities = FakeLocator(texts=self.texts, review_ids=self.review_ids).evaluate_all("")
+        if not blocked and (not identities or identities == arg):
             raise FakeTimeout("review content did not change")
 
 
@@ -206,6 +214,15 @@ class BrowserToolTests(unittest.TestCase):
         self.page.goto_actions = [{"status": 503, "html": '<input id="captchacharacters">'}]
         self.assertIn("captchacharacters", self.tool().load(FIRST).html)
 
+    def test_known_non_block_http_response_uses_typed_safe_failure_without_waiting(self):
+        self.page.goto_actions = [{"status": 404, "html": "<h1>Page unavailable</h1>",
+                                   "url": "https://www.amazon.in/errors/unavailable"}]
+        with self.assertRaises(browser_tool.PageHTTPError) as caught:
+            self.tool(retries=3).load(FIRST)
+        self.assertEqual(caught.exception.http_status, 404)
+        self.assertEqual(len(self.page.loads), 1)
+        self.assertEqual(self.page.waits, [])
+
     def test_direct_link_pagination_loads_without_clicking(self):
         control = FakeControl(f"/product-reviews/{ASIN}?pageNumber=2")
         self.page.controls[NEXT_SELECTORS[0]] = [control]
@@ -269,7 +286,7 @@ class BrowserToolTests(unittest.TestCase):
         self.assertIn("Second fictional review", snapshot.html)
         self.assertEqual(len(control.clicks), 1)
         self.assertEqual(len(self.page.loads), 1)
-        self.assertEqual(self.page.waits[-2][2], ["First fictional review"])
+        self.assertEqual(self.page.waits[-2][2], ["text:First fictional review"])
         self.assertIsNone(tool.advance())
 
     def test_ajax_url_change_without_review_change_times_out_without_second_click(self):
@@ -283,6 +300,32 @@ class BrowserToolTests(unittest.TestCase):
         self.assertIsNone(tool.advance())
         change_script = next(script for script, _, arg in self.page.waits if arg is not None)
         self.assertNotIn("location.href", change_script)
+
+    def test_changing_review_text_does_not_count_as_progress_when_ids_are_unchanged(self):
+        self.page.review_ids = ["SYNTHETIC-R1"]
+        self.page.controls[NEXT_SELECTORS[-1]] = [FakeControl()]
+        tool = self.tool(timeout_ms=500)
+        tool.load(FIRST)
+        self.page.change_callback = lambda: setattr(self.page, "texts", ["Changed button or review text"])
+        with self.assertRaises(FakeTimeout):
+            tool.advance()
+        self.assertEqual(len(self.page.controls[NEXT_SELECTORS[-1]][0].clicks), 1)
+        change_waits = [arg for _, _, arg in self.page.waits if arg is not None]
+        self.assertTrue(all(arg == ["id:SYNTHETIC-R1"] for arg in change_waits))
+
+    def test_changed_review_ids_allow_progress_even_when_displayed_text_matches(self):
+        self.page.review_ids = ["SYNTHETIC-R1"]
+        self.page.controls[NEXT_SELECTORS[-1]] = [FakeControl()]
+        tool = self.tool(timeout_ms=500)
+        tool.load(FIRST)
+
+        def finish_update():
+            self.page.review_ids = ["SYNTHETIC-R2"]
+            self.page.controls = {}
+
+        self.page.change_callback = finish_update
+        self.assertIsNotNone(tool.advance())
+        self.assertEqual(len(self.page.loads), 1)
 
     def test_same_document_absolute_fragment_uses_ajax_click(self):
         control = FakeControl(FIRST + "#more")
@@ -526,6 +569,17 @@ class HybridBrowserTests(unittest.TestCase):
             tool = self.tool([FakeHTTPResponse(html=html)])
             self.assertEqual(tool.load(FIRST).html, html)
             self.assertEqual(self.page.loads, [])
+
+    def test_known_http_failures_are_typed_and_do_not_fall_back(self):
+        for status in [404, 500, 503]:
+            with self.subTest(status=status):
+                response = FakeHTTPResponse(status=status)
+                tool = self.tool([response])
+                with self.assertRaises(browser_tool.PageHTTPError) as caught:
+                    tool.load(FIRST)
+                self.assertEqual(caught.exception.http_status, status)
+                self.assertEqual(self.page.loads, [])
+                self.assertTrue(response.disposed)
 
     def test_redirects_are_same_product_bounded_and_disposed(self):
         redirect = FakeHTTPResponse(status=302, headers={"location": SECOND})

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from collector import PageSnapshot, SafeNavigationError, collect_product, load_input_urls
+from collector import PageHTTPError, PageSnapshot, SafeNavigationError, collect_product, load_input_urls
 from review_store import ReviewStore
 
 
@@ -120,6 +120,48 @@ class CollectorTests(unittest.TestCase):
         report = collect_product(browser, self.store, PRODUCT, resume=True, max_pages=1)
         self.assertEqual((report["status"], report["pages_processed"], browser.advances), ("complete", 1, 1))
         self.assertEqual(self.store.summary()["total_reviews"], 2)
+
+    def test_repeated_identity_during_replay_does_not_advance_checkpoint(self):
+        self.store.save_page(ASIN, [], next_url=FIRST, pages_completed=2,
+                             replay_steps=2, status="paused")
+        repeated = PageSnapshot(FIRST, html(), has_next=True)
+        browser = FakeBrowser([repeated, repeated])
+        report = collect_product(browser, self.store, PRODUCT, resume=True)
+        self.assertEqual((report["status"], report["pages_processed"], report["inserted"]), ("partial", 0, 0))
+        self.assertEqual(browser.advances, 1)
+        checkpoint = self.store.get_checkpoint(ASIN)
+        self.assertEqual((checkpoint["pages_completed"], checkpoint["replay_steps"]), (2, 2))
+        self.assertIn("not advanced", report["detail"])
+
+    def test_resumed_target_cannot_repeat_a_page_seen_during_replay(self):
+        self.store.save_page(ASIN, [], next_url=FIRST, pages_completed=1,
+                             replay_steps=1, status="paused")
+        initial = PageSnapshot(FIRST, html(), has_next=True)
+        browser = FakeBrowser([initial, initial])
+        report = collect_product(browser, self.store, PRODUCT, resume=True, max_pages=1)
+        self.assertEqual((report["status"], report["pages_processed"]), ("partial", 0))
+        checkpoint = self.store.get_checkpoint(ASIN)
+        self.assertEqual((checkpoint["pages_completed"], checkpoint["replay_steps"]), (1, 1))
+
+    def test_all_stored_reviews_do_not_mean_a_distinct_resumed_page_is_complete(self):
+        initial = PageSnapshot(FIRST, html(), has_next=True)
+        second = PageSnapshot(FIRST, html("DEMO-R2"), has_next=True)
+        rows = [{"asin": ASIN, "product_url": PRODUCT, "review_id": identity}
+                for identity in ["DEMO-R1", "DEMO-R2"]]
+        self.store.save_page(ASIN, rows, next_url=FIRST, pages_completed=1,
+                             replay_steps=1, status="paused")
+        browser = FakeBrowser([initial, second])
+        report = collect_product(browser, self.store, PRODUCT, resume=True, max_pages=1)
+        self.assertEqual((report["status"], report["pages_processed"], report["inserted"]), ("paused", 1, 0))
+        checkpoint = self.store.get_checkpoint(ASIN)
+        self.assertEqual((checkpoint["pages_completed"], checkpoint["replay_steps"]), (2, 2))
+
+    def test_duplicate_container_counts_do_not_hide_repeated_identity_sets(self):
+        browser = FakeBrowser([PageSnapshot(FIRST, html(), has_next=True, next_url=SECOND),
+                               PageSnapshot(SECOND, html() + html(), has_next=True, next_url=FIRST)])
+        report = collect_product(browser, self.store, PRODUCT)
+        self.assertEqual(report["status"], "partial")
+        self.assertEqual(report["pages_processed"], 1)
 
     def test_replay_limit_stops_before_browser(self):
         self.store.save_page(ASIN, [], next_url=FIRST, pages_completed=21, replay_steps=21, status="paused")
@@ -285,6 +327,24 @@ class CollectorTests(unittest.TestCase):
         report = collect_product(FakeBrowser([error]), self.store, PRODUCT)
         self.assertEqual(report["status"], "blocked")
         self.assertEqual(self.store.get_checkpoint(ASIN)["status"], "blocked")
+
+    def test_known_http_failures_expose_only_validated_status(self):
+        for status in [404, 500, 503]:
+            with self.subTest(status=status):
+                error = PageHTTPError(status)
+                error.args = ("Cookie: PRIVATE-SYNTHETIC-SECRET",)
+                events = []
+                report = collect_product(FakeBrowser([error]), self.store, PRODUCT, on_progress=events.append)
+                self.assertEqual((report["status"], report["http_status"]), ("failed", status))
+                self.assertEqual(events[-1]["http_status"], status)
+                self.assertIn(f"HTTP {status}", report["detail"])
+                self.assertNotIn("PRIVATE-SYNTHETIC-SECRET", str(report))
+                self.assertNotIn("PRIVATE-SYNTHETIC-SECRET", self.store.get_checkpoint(ASIN)["detail"])
+
+    def test_http_failure_type_rejects_unvalidated_status_values(self):
+        for status in [True, "404", None, 99, 600, {"status": 404}]:
+            with self.subTest(status=status), self.assertRaises(ValueError):
+                PageHTTPError(status)
 
     def test_browser_diagnostics_do_not_leak_into_checkpoints_or_progress(self):
         events = []
