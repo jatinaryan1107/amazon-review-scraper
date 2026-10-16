@@ -1,6 +1,6 @@
 # Amazon review research project
 
-This project collects product reviews from Amazon India and stores them for later research. **Milestone 1 is a reliable data foundation: SQLite storage, duplicate prevention, resumable collection, and an offline demonstration. AI analysis and model-directed decisions are not implemented yet.**
+This project collects product reviews from Amazon India and stores them for later research. The current version includes Reviewdesk, a local interface for exploring reviews, alongside SQLite storage, duplicate prevention, resumable collection, and an offline demonstration. **AI analysis and model-directed decisions are not implemented yet.**
 
 ## Start with the offline demonstration
 
@@ -35,6 +35,27 @@ asin,product_url,review_id,reviewer_name,verified_purchase,review_title,rating,r
 An ASIN is Amazon's ten-character product identifier. `review_id` identifies one review. The database prevents duplicates using the product and review identity; repeated imports are safe. An invalid import fails as one transaction, so earlier rows from that import are rolled back. A missing input file or invalid CSV header is rejected before creating the database. `status` and `export` open the database in read-only mode and report an error if it does not exist.
 
 The CSV export contains review fields; database-only metadata and collection checkpoints remain in SQLite. Checkpoint counts, statuses, and details appear in the status output.
+
+## Reviewdesk interface
+
+Run the local workspace with Python 3.10 or newer:
+
+```powershell
+python dashboard.py
+```
+
+Open `http://127.0.0.1:8765` in your browser. The interface uses local assets and the Python standard library. It does not need Node, an AI API key, or an Amazon login.
+
+- **Overview** shows review counts, rating distribution, and product comparisons from the selected dataset.
+- **Reviews** supports text search, product and rating filters, verified-purchase filters, sorting, and full review details.
+- **Products** compares the products in the dataset and opens their reviews.
+- **Collection** shows saved progress and explains incomplete or blocked collection states.
+
+The demo workspace contains fictional reviews. Your reviews use `data/reviews.sqlite3`, the same database as the collection command. Importing a CSV keeps duplicate protection and rejects invalid batches without saving partial rows. Demo and personal data stay in separate databases.
+
+Downloads from the interface are spreadsheet-safe CSVs. Cells that could be interpreted as formulas receive a leading apostrophe. The stored text is unchanged; the command-line export retains the original field values for exact data processing.
+
+Use `--port` to change the port or `--data-dir` to select a different local data folder. The server listens only on this computer. Live collection remains a separate command, and AI analysis is not implemented yet.
 
 ## Live collection
 
@@ -76,7 +97,7 @@ The scraper is a tool with fixed rules. SQLite provides persistent memory. A lat
 
 The planned progression is:
 
-1. **Current:** dependable storage, bounded collection, resumability, and an offline demo.
+1. **Current:** dependable storage, bounded collection, resumability, an offline demo, and the Reviewdesk interface.
 2. **Next:** structured AI analysis with supporting review IDs and counts calculated by code.
 3. **Later:** one agent that selects tools, checks evidence, and stops within explicit step and spending limits.
 
@@ -88,6 +109,6 @@ Review text remains input data. Future AI tools must not treat instructions embe
 python -m unittest discover -s tests -v
 ```
 
-Validation uses new storage/offline code, a fake browser for the collection controller, and local HTML fixtures for the parser. It never executes the live `scraper.py` entry point or contacts Amazon. Passing these tests verifies local behavior; live pagination, saved-session validity, and compatibility with Amazon's current layout still require a separate, intentional live check.
+Validation uses local data, a fake browser for the collection controller, local HTML fixtures for the parser, and a loopback server for the interface API. It never executes the live `scraper.py` entry point or contacts Amazon. Passing these tests verifies local behavior; live pagination, saved-session validity, and compatibility with Amazon's current layout still require a separate, intentional live check.
 
 GitHub Actions runs the offline suite and a synthetic demo on Linux and Windows with Python 3.10 and 3.13. It does not install Playwright, open a browser, or need account secrets.
