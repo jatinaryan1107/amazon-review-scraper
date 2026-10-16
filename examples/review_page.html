@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>SYNTHETIC review fixture</title></head>
+<body>
+<!-- SYNTHETIC TEST DATA: invented people, product and reviews; not scraped from Amazon. -->
+<h1>Fictional Pocket Lamp: parser demonstration</h1>
+<div id="customer_review-FICTIONAL001" data-hook="review">
+  <a class="a-profile"><span class="a-profile-name">Example Reviewer A</span></a>
+  <a data-hook="review-title">
+    <i data-hook="review-star-rating"><span>5.0 out of 5 stars</span></i>
+    <span>Bright &amp; easy to carry</span>
+  </a>
+  <span data-hook="review-date">Reviewed in India on 10 October 2026</span>
+  <span data-hook="avp-badge">Verified Purchase</span>
+  <span data-hook="review-body"><span>The <strong>small lamp</strong> fits my bag.<br>Battery lasts&nbsp;all evening.</span></span>
+</div>
+<div data-hook="review" data-review-id="FICTIONAL002">
+  <span class="display-name a-profile-name">Example Reviewer B</span>
+  <a data-hook="reviewTitle"><span>Good light,</span> <em>loose stand</em></a>
+  <i data-hook="cmps-review-star-rating"><span>3.0 out of 5 stars</span></i>
+  <span data-hook="review-date">Reviewed in India on 11 October 2026</span>
+  <div data-hook="reviewText">The light is clear. <span>The stand feels loose.</span></div>
+</div>
+<!-- No supplied ID: extraction must create the same fingerprint on every import. -->
+<article data-hook="review">
+  <span class="a-profile-name">Example Reviewer C</span>
+  <span class="review-rating">4.0 out of 5 stars</span>
+  <span data-hook="review-title">Useful for a desk</span>
+  <span data-hook="review-date">Reviewed in India on 12 October 2026</span>
+  <div data-hook="review-body"><span>Easy controls &amp; a comfortable warm light.</span></div>
+</article>
+</body>
+</html>

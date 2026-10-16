@@ -1,7 +1,14 @@
 auth.json
+.auth-*.json
+debug_review_*.html
+*.sqlite3
+*.sqlite3-*
+*.db
 *.csv
 !input_urls.csv
-debug_review_*.html
+!examples/demo_reviews.csv
 __pycache__/
 *.pyc
 .env
+legacy/
+UPSTREAM.md

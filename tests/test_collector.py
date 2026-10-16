@@ -1,0 +1,205 @@
+"""Offline controller tests. FakeBrowser cannot perform network requests."""
+
+import ast
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from collector import PageSnapshot, collect_product, load_input_urls
+from review_store import ReviewStore
+
+
+ASIN = "B0DEMO0001"
+PRODUCT = f"https://www.amazon.in/dp/{ASIN}"
+FIRST = f"https://www.amazon.in/product-reviews/{ASIN}?reviewerType=all_reviews"
+SECOND = FIRST + "&pageNumber=2"
+
+
+def html(review_id="DEMO-R1", rating="4.0"):
+    return f'''<html><title>Synthetic reviews</title><div data-hook="review" id="{review_id}">
+      <span class="a-profile-name">Demo reviewer</span>
+      <span data-hook="review-title">Fictional review</span>
+      <span data-hook="review-star-rating">{rating} out of 5 stars</span>
+      <span data-hook="review-body">Synthetic evidence for an offline test.</span>
+    </div></html>'''
+
+
+class FakeBrowser:
+    def __init__(self, snapshots):
+        self.snapshots = snapshots
+        self.loads = []
+        self.advances = 0
+        self.index = 0
+
+    def load(self, url):
+        self.loads.append(url)
+        self.index = 0
+        if isinstance(self.snapshots[0], BaseException):
+            raise self.snapshots[0]
+        return self.snapshots[0]
+
+    def advance(self):
+        self.advances += 1
+        self.index += 1
+        if self.index >= len(self.snapshots):
+            return None
+        value = self.snapshots[self.index]
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+
+class CollectorTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.store = ReviewStore(self.root / "reviews.sqlite3")
+        self.addCleanup(self.store.close)
+
+    def test_page_budget_resume_and_completed_skip(self):
+        browser = FakeBrowser([PageSnapshot(FIRST, html(), has_next=True, next_url=SECOND)])
+        first = collect_product(browser, self.store, PRODUCT, max_pages=1)
+        self.assertEqual((first["status"], first["inserted"]), ("paused", 1))
+        self.assertEqual(browser.advances, 0)  # budget never requests the next page
+        self.assertEqual(self.store.get_checkpoint(ASIN)["next_url"], SECOND)
+        browser2 = FakeBrowser([PageSnapshot(SECOND, html("DEMO-R2"))])
+        second = collect_product(browser2, self.store, PRODUCT, resume=True)
+        self.assertEqual(second["status"], "complete")
+        self.assertEqual(browser2.loads, [SECOND])
+        self.assertEqual(self.store.get_checkpoint(ASIN)["pages_completed"], 2)
+        self.assertEqual(self.store.summary()["total_reviews"], 2)
+        browser3 = FakeBrowser([])
+        skipped = collect_product(browser3, self.store, PRODUCT, resume=True)
+        self.assertTrue(skipped["skipped"])
+        self.assertEqual(browser3.loads, [])
+
+    def test_restart_retains_rows_and_restarts_cursor(self):
+        collect_product(FakeBrowser([PageSnapshot(FIRST, html(), has_next=True, next_url=SECOND)]), self.store, PRODUCT, max_pages=1)
+        browser = FakeBrowser([PageSnapshot(FIRST, html())])
+        report = collect_product(browser, self.store, PRODUCT, resume=True, restart=True)
+        self.assertEqual(browser.loads, [FIRST])
+        self.assertEqual(report["inserted"], 0)
+        self.assertEqual(self.store.summary()["total_reviews"], 1)
+        self.assertEqual(self.store.get_checkpoint(ASIN)["pages_completed"], 1)
+
+    def test_ajax_resume_replays_then_processes_saved_position(self):
+        initial = PageSnapshot(FIRST, html(), has_next=True)
+        collect_product(FakeBrowser([initial]), self.store, PRODUCT, max_pages=1)
+        self.assertEqual(self.store.get_checkpoint(ASIN)["replay_steps"], 1)
+        browser = FakeBrowser([initial, PageSnapshot(FIRST, html("DEMO-R2"))])
+        report = collect_product(browser, self.store, PRODUCT, resume=True, max_pages=1)
+        self.assertEqual((report["status"], report["pages_processed"], browser.advances), ("complete", 1, 1))
+        self.assertEqual(self.store.summary()["total_reviews"], 2)
+
+    def test_replay_limit_stops_before_browser(self):
+        self.store.save_page(ASIN, [], next_url=FIRST, pages_completed=21, replay_steps=21, status="paused")
+        browser = FakeBrowser([])
+        report = collect_product(browser, self.store, PRODUCT, resume=True)
+        self.assertEqual(report["status"], "paused")
+        self.assertEqual(browser.loads, [])
+
+    def test_ajax_limit_pause_has_a_resumable_explicit_override(self):
+        initial = PageSnapshot(FIRST, html(), has_next=True)
+        second = PageSnapshot(FIRST, html("DEMO-R2"), has_next=True)
+        third = PageSnapshot(FIRST, html("DEMO-R3"))
+        report = collect_product(FakeBrowser([initial, second, third]), self.store, PRODUCT, max_pages=3, replay_limit=1)
+        self.assertEqual(report["status"], "paused")
+        self.assertIn("--replay-limit 2", report["detail"])
+        resumed = collect_product(FakeBrowser([initial, second, third]), self.store, PRODUCT, resume=True, replay_limit=2)
+        self.assertEqual(resumed["status"], "complete")
+        self.assertEqual(self.store.summary()["total_reviews"], 3)
+
+    def test_wrong_product_is_rejected_before_replay_click(self):
+        self.store.save_page(ASIN, [], next_url=FIRST, pages_completed=1, replay_steps=1, status="paused")
+        browser = FakeBrowser([PageSnapshot("https://www.amazon.in/product-reviews/B0DEMO0002", html())])
+        report = collect_product(browser, self.store, PRODUCT, resume=True)
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(browser.advances, 0)
+
+    def test_blocked_zero_unknown_and_wrong_product_are_distinct(self):
+        cases = [
+            (PageSnapshot("https://www.amazon.in/ap/signin", '<input id="ap_email">'), "blocked"),
+            (PageSnapshot(FIRST, '<input id="captchacharacters">'), "blocked"),
+            (PageSnapshot(FIRST, '<div data-hook="no-reviews-section">No customer reviews</div>'), "zero_reviews"),
+            (PageSnapshot(FIRST, "<html>Changed layout</html>"), "failed"),
+            (PageSnapshot("https://www.amazon.in/product-reviews/B0DEMO0002", "<p>No customer reviews</p>"), "failed"),
+        ]
+        for snapshot, expected in cases:
+            with self.subTest(expected=expected, url=snapshot.url):
+                report = collect_product(FakeBrowser([snapshot]), self.store, PRODUCT)
+                self.assertEqual(report["status"], expected)
+                self.assertEqual(self.store.summary()["total_reviews"], 0)
+
+    def test_repeated_review_page_stops_partial(self):
+        browser = FakeBrowser([
+            PageSnapshot(FIRST, html(), has_next=True, next_url=SECOND),
+            PageSnapshot(SECOND, html(), has_next=True, next_url=FIRST),
+        ])
+        report = collect_product(browser, self.store, PRODUCT)
+        self.assertEqual(report["status"], "partial")
+        self.assertEqual(self.store.summary()["total_reviews"], 1)
+
+    def test_navigation_error_retains_retry_cursor(self):
+        browser = FakeBrowser([
+            PageSnapshot(FIRST, html(), has_next=True, next_url=SECOND),
+            RuntimeError("Synthetic navigation failure"),
+        ])
+        report = collect_product(browser, self.store, PRODUCT)
+        checkpoint = self.store.get_checkpoint(ASIN)
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(checkpoint["next_url"], SECOND)
+        self.assertEqual(checkpoint["pages_completed"], 1)
+        self.assertEqual(self.store.summary()["total_reviews"], 1)
+
+    def test_failed_row_validation_does_not_skip_unsaved_page(self):
+        report = collect_product(FakeBrowser([PageSnapshot(FIRST, html(rating="9"), has_next=True, next_url=SECOND)]), self.store, PRODUCT)
+        checkpoint = self.store.get_checkpoint(ASIN)
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(checkpoint["next_url"], FIRST)
+        self.assertEqual(checkpoint["pages_completed"], 0)
+        self.assertEqual(self.store.summary()["total_reviews"], 0)
+
+    def test_interrupt_retains_saved_position(self):
+        browser = FakeBrowser([PageSnapshot(FIRST, html(), has_next=True, next_url=SECOND), KeyboardInterrupt()])
+        with self.assertRaises(KeyboardInterrupt):
+            collect_product(browser, self.store, PRODUCT)
+        checkpoint = self.store.get_checkpoint(ASIN)
+        self.assertEqual(checkpoint["status"], "paused")
+        self.assertEqual(checkpoint["next_url"], SECOND)
+        self.assertEqual(self.store.summary()["total_reviews"], 1)
+
+    def test_interrupt_during_page_save_keeps_unsaved_page_cursor(self):
+        original_save = self.store.save_page
+
+        def interrupt_rows(asin, rows, **kwargs):
+            if rows:
+                raise KeyboardInterrupt
+            return original_save(asin, rows, **kwargs)
+
+        with patch.object(self.store, "save_page", side_effect=interrupt_rows):
+            with self.assertRaises(KeyboardInterrupt):
+                collect_product(FakeBrowser([PageSnapshot(FIRST, html(), has_next=True, next_url=SECOND)]), self.store, PRODUCT)
+        checkpoint = self.store.get_checkpoint(ASIN)
+        self.assertEqual(checkpoint["status"], "paused")
+        self.assertEqual(checkpoint["next_url"], FIRST)
+        self.assertEqual(checkpoint["pages_completed"], 0)
+        self.assertEqual(self.store.summary()["total_reviews"], 0)
+
+    def test_input_validation_and_product_deduplication(self):
+        source = self.root / "input.csv"
+        source.write_text(f"url\n{PRODUCT}\n{FIRST}\n\n", encoding="utf-8")
+        self.assertEqual(load_input_urls(source), [PRODUCT])
+        source.write_text(PRODUCT + "\nhttps://amazon.in.evil.test/dp/" + ASIN, encoding="utf-8")
+        with self.assertRaises(ValueError):
+            load_input_urls(source)
+
+    def test_live_entry_point_syntax_without_executing_it(self):
+        source = Path(__file__).resolve().parents[1] / "scraper.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        self.assertIsInstance(tree, ast.Module)
+
+
+if __name__ == "__main__":
+    unittest.main()
