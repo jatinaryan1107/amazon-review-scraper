@@ -1,6 +1,6 @@
 # Amazon review research project
 
-This project collects product reviews from Amazon India and stores them for later research. The current version includes Reviewdesk, a local interface for exploring reviews, alongside SQLite storage, duplicate prevention, resumable collection, and an offline demonstration. **AI analysis and model-directed decisions are not implemented yet.**
+This project collects product reviews from Amazon India and stores them for research in Reviewdesk. You can start a bounded background collection, resume saved progress, and automatically generate a local report with source reviews. Local analysis is free to run and uses transparent keyword rules and rating statistics. Optional OpenAI analysis requires explicit configuration and consent. **The workflow follows fixed steps; model-directed tool selection is a later milestone.**
 
 ## Start with the offline demonstration
 
@@ -44,18 +44,55 @@ Run the local workspace with Python 3.10 or newer:
 python dashboard.py
 ```
 
-Open `http://127.0.0.1:8765` in your browser. The interface uses local assets and the Python standard library. It does not need Node, an AI API key, or an Amazon login.
+Open [Reviewdesk](http://127.0.0.1:8765) in your browser. Exploring stored reviews and running local analysis uses local assets and the Python standard library. It does not need Node, an API key, or an Amazon login. Live collection additionally needs Playwright, Chromium, and a manually saved Amazon session.
 
 - **Overview** shows review counts, rating distribution, and product comparisons from the selected dataset.
 - **Reviews** supports text search, product and rating filters, verified-purchase filters, sorting, and full review details.
 - **Products** compares the products in the dataset and opens their reviews.
-- **Collection** shows saved progress and explains incomplete or blocked collection states.
+- **Collection** starts background jobs, connects a session, reports progress, and resumes saved positions.
+- **Analysis** creates scoped reports with exact rating statistics, recurring topics, and links to source reviews.
 
 The demo workspace contains fictional reviews. Your reviews use `data/reviews.sqlite3`, the same database as the collection command. Importing a CSV keeps duplicate protection and rejects invalid batches without saving partial rows. Demo and personal data stay in separate databases.
 
 Downloads from the interface are spreadsheet-safe CSVs. Cells that could be interpreted as formulas receive a leading apostrophe. The stored text is unchanged; the command-line export retains the original field values for exact data processing.
 
-Use `--port` to change the port or `--data-dir` to select a different local data folder. The server listens only on this computer. Live collection remains a separate command, and AI analysis is not implemented yet.
+Use `--port` to change the port, `--data-dir` to select a different local data folder, or `--auth-file` to choose the saved session file. The server listens only on `127.0.0.1` and has no account or deployment system. Run one dashboard per data folder. A process lock prevents two workers from using the same job database.
+
+## Collect and analyse from Reviewdesk
+
+Install live collection support once:
+
+```powershell
+python -m pip install -r requirements.txt
+python -m playwright install chromium
+python dashboard.py
+```
+
+1. Open **Collection** and choose **Open sign-in**. A separate Amazon browser opens. Sign in there yourself, then choose **Save signed-in session** in Reviewdesk. Credentials never pass through the dashboard form. A saved session is not a guarantee that Amazon will accept it later.
+2. Paste one HTTPS Amazon India product URL per line. Start with one product and two or three pages. The interface allows up to ten products, twenty new pages per product, and fifty new pages across a job. Restoring an in-place position has a separate limit of twenty earlier clicks per product.
+3. Keep **Continue saved progress** selected to resume unfinished products and skip completed ones. Clearing it starts at the beginning while keeping stored reviews and duplicate prevention.
+4. Keep **Analyse after collection** selected for a free local report covering My workspace. Collection always saves to My workspace, even when the demo dataset is selected.
+5. Follow **Activity** for real page and review counts. **Stop job** requests a cooperative stop, which can take until the current browser operation finishes. Committed rows and checkpoints remain available.
+
+Login screens, CAPTCHA, and HTTP 403 or 429 stop the batch. Resolve access manually before starting another job. The application does not solve challenges or rotate identities. The sign-in window closes after ten minutes if it is not completed.
+
+Jobs and reports persist in `data/jobs.sqlite3`. A server restart marks unfinished jobs interrupted. It does not silently restart collection or paid analysis. Start a new job with Continue saved progress to resume. Reports remain available after a restart and are marked stale when their source review content changes.
+
+## What local analysis can tell you
+
+Local analysis calculates averages and rating groups from all stored reviews in the selected scope. Missing ratings remain separate. It scans English keywords for topics such as battery, noise, price, delivery, and support, counts each matching review once per topic, and keeps exact excerpts linked to the original product and review ID. A review may match several topics.
+
+These rules do not understand sarcasm, multilingual text, or context like a language model. A mention of battery life does not establish a battery defect. Star-rating groups describe the review's overall rating, not sentiment about each topic. The interface states the method and sample limits so the results can be checked.
+
+## Optional OpenAI analysis
+
+OpenAI is disabled by default. To enable it, set `OPENAI_API_KEY` and an explicit `OPENAI_MODEL` in the environment of the server process, then restart the dashboard. Keep keys out of source code and CSV files. The application does not load a `.env` file or expose the key through its API.
+
+In **Analysis**, choose a scope, select OpenAI, and explicitly allow the selected review text to be sent. This is a separate manual action; automatic analysis after collection always uses the local method. There is one bounded Responses API request, no automatic retries, no model tools, and a maximum of 3,500 output tokens. The input includes at most 120 reviews and 180,000 characters, with titles and bodies individually capped. Reports disclose skipped reviews and shortened text.
+
+Provider input uses opaque evidence and product keys with text and ratings. The app omits author fields, product URLs, dates, and original review IDs. Review text itself may still contain personal information, so inspect your data before opting in. `store:false` disables Responses application-state storage; provider data-handling terms still apply. Every returned evidence key and quote must match the supplied text, or the report is rejected. Exact statistics always come from local code. A valid quote does not by itself establish that the model's interpretation is correct.
+
+Unchanged content reuses a matching saved report, including the model choice, without another provider request. Changed text, ratings, product scope, or analysis version invalidates that match. Input/output caps bound the request size, not a guaranteed currency amount; actual cost depends on the configured model's [current pricing](https://developers.openai.com/api/docs/pricing). The optional adapter is tested with fake responses; live provider access is a separate check.
 
 ## Live collection
 
@@ -75,6 +112,8 @@ Authentication opens a browser for you to sign in manually and saves the session
 - Without `--resume`, collection starts at the beginning; persistent duplicate prevention still applies.
 - `--restart` resets the pagination checkpoint and starts again. It retains stored reviews. Use either `--restart` or `--resume`; these options are mutually exclusive.
 - `--until-end` is accepted for compatibility; the `--pages` budget still applies.
+- `--transport hybrid` enables the experimental HTTP-first path described below. Browser collection is the default.
+- `--delay 1` sets the minimum interval between request starts. Time spent waiting for a slow response counts toward the interval. `--full-assets` keeps images, fonts, and media enabled; collection normally skips them while retaining scripts and styles.
 
 Amazon can change page layouts, restrict access, ask for login, or show a CAPTCHA. Collection records failures and blocked states. A login screen or CAPTCHA stops the entire invocation; the collector does not solve CAPTCHAs. A completed traversal means the collector found no next page under the current layout. **It does not guarantee that every review was collected.** Always interpret findings using the actual sample size and collection status.
 
@@ -91,17 +130,36 @@ Use the path to your existing CSV in place of `reviews.csv`. The nine review col
 
 The original collector appended directly to CSV. Collection now writes to `data/reviews.sqlite3` by default; `--db` selects a different file. `--output` is optional and writes a fresh CSV export of the stored reviews instead of appending rows. Use a separate output filename to keep an existing CSV unchanged. The `--auth` command still opens the browser for manual sign-in.
 
+## Collection architecture and alternatives
+
+The CLI and interface share `collection_runtime.py`. One worker thread owns the synchronous Playwright objects, browser context, and writable review store for the batch. HTTP handlers enqueue work and return immediately. Progress is reported after durable saves. The browser session is reused across products, and refreshed state is saved atomically after a successful batch. Blocked runs retain the previous session file.
+
+The original fixed two-second sleep has been replaced in the shared runtime by a minimum start interval, one second by default. Images, fonts, and media can be skipped. The **experimental hybrid** transport uses `context.request` with the same cookies to fetch ordinary review-page HTML without rendering it. It validates same-product HTTPS URLs and redirects, disposes responses, and returns to the browser for JavaScript pagination, unknown layouts, or a page without a confirmed next link. The browser confirms pagination boundaries. Login, CAPTCHA, and HTTP access blocks stop collection instead of triggering another transport.
+
+This reduces avoidable rendering where server HTML is sufficient, but it is not an official review API and has no demonstrated live speedup yet. AJAX show-more positions can still require replay after a restart. A small browser-versus-hybrid run with the same product, page limit, and refreshed starting position is needed for a meaningful comparison. Job metrics include elapsed time, pacing time, HTTP pages, browser pages, fallbacks, and skipped assets. Different review order or access conditions can make comparisons misleading.
+
+Other sources were considered:
+
+| Source | Useful for | Limitation for this project |
+| --- | --- | --- |
+| Amazon Creators API | Official product catalog, offers, variations, and discovery | The documented operations and resources do not provide a general full-review-text feed. It requires Associates access. |
+| Amazon Selling Partner Customer Feedback API | Seller and vendor review and return insights | It exposes a business insights workflow with its own access requirements, rather than a drop-in general review scraper. |
+| Amazon Reviews 2023 research dataset | Offline analysis and evaluation without live scraping | Historical data through September 2023 does not provide current arbitrary Amazon India reviews. |
+| CSV from an existing authorised source | Immediate local analysis with no browser waiting | Freshness and coverage depend on that source. |
+
+Primary references: [Creators API resources](https://affiliate-program.amazon.com/creatorsapi/docs/en-us/api-reference), [Customer Feedback API announcement](https://developer-docs.amazon.com/sp-api/docs/sp-api-release-notes), [Amazon Reviews 2023](https://amazon-reviews-2023.github.io/main.html), [Playwright session reuse](https://playwright.dev/python/docs/auth), [shared-cookie requests](https://playwright.dev/python/docs/api/class-apirequestcontext), and [network resource controls](https://playwright.dev/python/docs/network).
+
 ## How this becomes an agentic AI project
 
-The scraper is a tool with fixed rules. SQLite provides persistent memory. A later AI agent can choose tools to search stored reviews, examine themes, request more evidence within limits, and create a report. Supporting review IDs will let a person check each claim. Future evaluation should check evidence quality as well as whether the code ran successfully.
+The current workflow collects, stores, analyses, and presents evidence in fixed steps. SQLite provides persistent memory. A later AI agent can choose tools to search stored reviews, request more evidence within limits, and revise a report. Supporting review IDs let a person check each claim. Future evaluation should check evidence quality as well as whether the code ran successfully.
 
 The planned progression is:
 
-1. **Current:** dependable storage, bounded collection, resumability, an offline demo, and the Reviewdesk interface.
-2. **Next:** structured AI analysis with supporting review IDs and counts calculated by code.
+1. **Current:** dependable storage, bounded background collection, resumability, Reviewdesk, local analysis, and optional structured OpenAI reports with validated source quotes.
+2. **Next:** evaluate live collection compatibility and the quality of topic matches and AI interpretations against reviewed examples.
 3. **Later:** one agent that selects tools, checks evidence, and stops within explicit step and spending limits.
 
-Review text remains input data. Future AI tools must not treat instructions embedded in a review as authority to act.
+Review text remains input data. The optional AI prompt treats it as untrusted evidence, and no tools are exposed to the model. Future agents must preserve that boundary.
 
 ## Validation
 
@@ -109,6 +167,6 @@ Review text remains input data. Future AI tools must not treat instructions embe
 python -m unittest discover -s tests -v
 ```
 
-Validation uses local data, a fake browser for the collection controller, local HTML fixtures for the parser, and a loopback server for the interface API. It never executes the live `scraper.py` entry point or contacts Amazon. Passing these tests verifies local behavior; live pagination, saved-session validity, and compatibility with Amazon's current layout still require a separate, intentional live check.
+Validation uses local data, fake browser/request adapters, local HTML fixtures, fake provider responses, and a loopback server for the interface API. It checks collection cancellation, access blocks, session persistence, job recovery, schema preservation, report caching, quote validation, and the UI API. It never executes the live `scraper.py` entry point, contacts Amazon, or calls OpenAI. Passing these tests verifies local behavior; live pagination, saved-session validity, provider access, and compatibility with Amazon's current layout require separate intentional checks.
 
 GitHub Actions runs the offline suite and a synthetic demo on Linux and Windows with Python 3.10 and 3.13. It does not install Playwright, open a browser, or need account secrets.

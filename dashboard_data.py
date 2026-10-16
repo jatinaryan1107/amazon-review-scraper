@@ -200,6 +200,12 @@ class DashboardData:
             )] if connection else []
             return {"items": items, "total": total, "page": page, "pages": pages, "page_size": query.page_size}
 
+    def review(self, dataset: str, asin: str, review_id: str):
+        with self.connection(dataset) as connection:
+            row = connection.execute(f"SELECT {REVIEW_COLUMNS} FROM reviews WHERE asin=? AND review_id=?",
+                                     (asin, review_id)).fetchone() if connection else None
+            return dict(row) if row else None
+
     def export(self, query: ReviewQuery) -> bytes:
         buffer = io.StringIO(newline="")
         writer = csv.DictWriter(buffer, fieldnames=REVIEW_FIELDS)

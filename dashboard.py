@@ -1,4 +1,4 @@
-"""Serve the local Reviewdesk interface without running collection or AI tools."""
+"""Serve Reviewdesk and enqueue explicit local collection and analysis jobs."""
 
 from __future__ import annotations
 
@@ -6,11 +6,14 @@ import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import sqlite3
 import sys
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from dashboard_data import MAX_IMPORT_BYTES, DashboardData, ReviewQuery
+from job_manager import AutomationService, JobConflict
+from review_parser import extract_asin
 
 
 ROOT = Path(__file__).resolve().parent
@@ -34,11 +37,21 @@ class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], data: DashboardData):
+    def __init__(self, address: tuple[str, int], data: DashboardData, *, automation=None, auth_file=None):
         if address[0] != "127.0.0.1":
             raise ValueError("The dashboard can bind only to 127.0.0.1.")
         self.data = data
         super().__init__(address, DashboardHandler)
+        try:
+            self.automation = automation or AutomationService(data, auth_file or ROOT / "auth.json")
+        except BaseException:
+            super().server_close()
+            raise
+
+    def server_close(self):
+        super().server_close()
+        if getattr(self, "automation", None):
+            self.automation.close()
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -100,6 +113,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 filename, content_type = STATIC_FILES[path]
                 self.respond(200, (ROOT / "web" / filename).read_bytes(), content_type)
                 return
+            if path == "/api/automation":
+                if parsed.query:
+                    raise ValueError("Automation status does not accept filters.")
+                self.json_response(200, self.server.automation.status())
+                return
+            if path in {"/api/analysis", "/api/review"}:
+                params = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                allowed = {"dataset", "asin", "review_id"} if path == "/api/review" else {"dataset", "asin"}
+                if set(params) - allowed or any(len(value) != 1 for value in params.values()):
+                    raise ValueError("Choose one dataset and product scope.")
+                dataset = params.get("dataset", ["demo"])[0]
+                asin = params.get("asin", [""])[0]
+                self.server.data.path(dataset)
+                if asin and extract_asin(f"https://www.amazon.in/dp/{asin}") != asin:
+                    raise ValueError("Choose a valid product ASIN.")
+                if path == "/api/analysis":
+                    self.json_response(200, self.server.automation.latest_report(dataset, asin))
+                else:
+                    review_id = params.get("review_id", [""])[0]
+                    if not asin or not review_id or len(review_id) > 2048:
+                        raise ValueError("Choose a product and review ID.")
+                    review = self.server.data.review(dataset, asin, review_id)
+                    self.json_response(200 if review else 404, {"review": review} if review else {"error": "This review is no longer available in this dataset."})
+                return
             if path not in {"/api/overview", "/api/reviews", "/api/export"}:
                 self.json_response(404, {"error": "This page does not exist."})
                 return
@@ -130,6 +167,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         try:
             parsed = urlsplit(self.path)
+            if not parsed.scheme and not parsed.netloc and (parsed.path == "/api/jobs" or parsed.path.startswith("/api/jobs/")):
+                if parsed.query:
+                    raise ValueError("Job actions do not accept query filters.")
+                self.post_job(parsed.path)
+                return
             if parsed.path != "/api/import" or parsed.scheme or parsed.netloc:
                 self.json_response(404, {"error": "This page does not exist."})
                 return
@@ -162,6 +204,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.json_response(400, {"error": "The CSV upload was incomplete. Try again."})
                 return
             self.json_response(200, self.server.data.import_csv(payload))
+        except JobConflict as exc:
+            self.json_response(409, {"error": str(exc)})
+        except LookupError as exc:
+            self.json_response(404, {"error": str(exc)})
         except ValueError as exc:
             status = 500 if self.is_database_error(exc) else 400
             if status == 500:
@@ -171,21 +217,68 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.log_error("Local CSV import could not be saved: %s", exc)
             self.json_response(500, {"error": "The CSV could not be saved. Check the server terminal."})
 
+    def post_job(self, path):
+        if self.headers.get_all("X-Reviewdesk-Request", []) != ["1"]:
+            self.json_response(403, {"error": "Start jobs from the local Reviewdesk page."})
+            return
+        if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+            self.json_response(415, {"error": "Job actions require a JSON request."})
+            return
+        lengths = self.headers.get_all("Content-Length", [])
+        if self.headers.get_all("Transfer-Encoding") or len(lengths) != 1:
+            raise ValueError("The job request must include one body size.")
+        try:
+            length = int(lengths[0])
+        except ValueError:
+            length = -1
+        if not 0 < length <= 16_384:
+            self.json_response(413 if length > 16_384 else 400, {"error": "Supply a nonempty JSON object no larger than 16 KiB."})
+            return
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise ValueError("The job request was incomplete.")
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("Each job option can be supplied only once.")
+                result[key] = value
+            return result
+        def invalid_constant(value):
+            raise ValueError("Job numbers must be finite.")
+        try:
+            payload = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=invalid_constant)
+        except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+            raise ValueError("The job request is not valid UTF-8 JSON.") from exc
+        if path == "/api/jobs":
+            self.json_response(202, {"job": self.server.automation.submit(payload)})
+            return
+        match = re.fullmatch(r"/api/jobs/([a-f0-9]{32})/(cancel|finish)", path)
+        if match is None:
+            self.json_response(404, {"error": "This job action does not exist."})
+            return
+        if payload != {}:
+            raise ValueError("This job action does not accept options.")
+        job_id, action = match.groups()
+        service = self.server.automation
+        self.json_response(200, {"job": service.cancel(job_id) if action == "cancel" else service.finish_auth(job_id)})
+
     def do_OPTIONS(self) -> None:
         self.json_response(405, {"error": "Cross-origin requests are not supported."})
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Open Reviewdesk locally without running the scraper.")
+    parser = argparse.ArgumentParser(description="Open Reviewdesk locally. Collection starts only when you request a job.")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
+    parser.add_argument("--auth-file", type=Path, default=ROOT / "auth.json")
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error("port must be between 1 and 65535")
     try:
         data = DashboardData(args.data_dir)
         data.seed_demo()
-        with DashboardServer(("127.0.0.1", args.port), data) as server:
+        with DashboardServer(("127.0.0.1", args.port), data, auth_file=args.auth_file) as server:
             print(f"Local: http://127.0.0.1:{server.server_address[1]}", flush=True)
             print("Demo reviews are fictional. Press Ctrl+C to stop.", flush=True)
             server.serve_forever()

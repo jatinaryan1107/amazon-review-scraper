@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import browser_tool
-from browser_tool import NEXT_SELECTORS, PlaywrightBrowser
+from browser_tool import AccessBlockedError, HTTPFirstBrowser, NEXT_SELECTORS, PlaywrightBrowser
 
 
 ASIN = "B0DEMO0001"
@@ -67,8 +67,10 @@ class FakeLocator:
 
 
 class FakeResponse:
-    def __init__(self, status):
+    def __init__(self, status, url=FIRST, resource_type="document"):
         self.status = status
+        self.url = url
+        self.request = type("Request", (), {"resource_type": resource_type})()
 
 
 class FakePage:
@@ -85,6 +87,14 @@ class FakePage:
         self.waits = []
         self.ready_timeout = False
         self.change_callback = None
+        self.listeners = {}
+
+    def on(self, event, callback):
+        self.listeners.setdefault(event, []).append(callback)
+
+    def emit_response(self, response):
+        for callback in self.listeners.get("response", ()):
+            callback(response)
 
     def content(self):
         return self.html
@@ -101,7 +111,9 @@ class FakePage:
                 setattr(self, name, value)
         if "error" in action:
             raise action["error"]
-        return FakeResponse(action.get("status", 200))
+        response = FakeResponse(action.get("status", 200), self.url)
+        self.emit_response(response)
+        return response
 
     def locator(self, selector):
         if selector == '[data-hook="review"]':
@@ -169,6 +181,7 @@ class BrowserToolTests(unittest.TestCase):
             with self.assertRaisesRegex(FakeTimeout, "original navigation timeout"):
                 self.tool(retries=0).load(FIRST)
         self.assertEqual(len(self.page.loads), 1)
+
 
     def test_captcha_on_timeout_stops_navigation_retries(self):
         self.page.goto_actions = [{"error": FakeTimeout("slow"),
@@ -271,6 +284,41 @@ class BrowserToolTests(unittest.TestCase):
         self.assertEqual(len(control.clicks), 1)
         self.assertIsNone(tool.advance())
 
+    def test_ajax_access_block_stops_after_one_click_without_another_load(self):
+        for status in [403, 429]:
+            with self.subTest(status=status):
+                self.page = FakePage()
+                control = FakeControl(on_click=lambda: self.page.emit_response(
+                    FakeResponse(status, "https://www.amazon.in/hz/reviews-render/ajax/reviews/get/", "xhr")))
+                self.page.controls[NEXT_SELECTORS[-1]] = [control]
+                tool = self.tool()
+                tool.load(FIRST)
+                with self.assertRaises(browser_tool.AccessBlockedError) as caught:
+                    tool.advance()
+                self.assertEqual(caught.exception.http_status, status)
+                self.assertEqual(len(control.clicks), 1)
+                self.assertEqual(len(self.page.loads), 1)
+
+    def test_access_block_while_waiting_for_ajax_is_observed_without_more_clicks(self):
+        self.page.controls[NEXT_SELECTORS[-1]] = [FakeControl()]
+        tool = self.tool()
+        tool.load(FIRST)
+        self.page.change_callback = lambda: self.page.emit_response(
+            FakeResponse(429, "https://www.amazon.in/review-update", "fetch"))
+        with self.assertRaises(browser_tool.AccessBlockedError):
+            tool.advance()
+        self.assertEqual(len(self.page.controls[NEXT_SELECTORS[-1]][0].clicks), 1)
+
+    def test_static_third_party_and_non_https_failures_do_not_block_review_pages(self):
+        tool = self.tool()
+        tool.load(FIRST)
+        for response in [FakeResponse(403, FIRST, "image"), FakeResponse(429, FIRST, "font"),
+                         FakeResponse(403, "https://cdn.example.test/resource", "xhr"),
+                         FakeResponse(429, "http://www.amazon.in/", "fetch"),
+                         FakeResponse(403, "https://www.amazon.in.evil.test/", "document")]:
+            self.page.emit_response(response)
+        self.assertIsNone(tool.advance())
+
     def test_next_control_must_refer_to_same_product(self):
         for href in [OTHER, "https://example.com/", "javascript:alert(1)"]:
             with self.subTest(href=href):
@@ -319,6 +367,134 @@ class BrowserToolTests(unittest.TestCase):
         self.assertEqual(snapshot.html, self.page.html)
         self.assertFalse(snapshot.has_next)
         self.assertEqual(len(self.page.loads), 1)
+
+
+class FakeHTTPResponse:
+    def __init__(self, url=FIRST, html=None, status=200, headers=None):
+        self.url = url
+        self.html = review_html() if html is None else html
+        self.status = status
+        self.headers = {"content-type": "text/html; charset=utf-8", **(headers or {})}
+        self.disposed = False
+
+    def text(self):
+        return self.html
+
+    def dispose(self):
+        self.disposed = True
+
+
+class FakeRequest:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        if not self.responses:
+            raise AssertionError("Unexpected HTTP request")
+        return self.responses.pop(0)
+
+
+class HybridBrowserTests(unittest.TestCase):
+    def tool(self, responses):
+        self.page = FakePage()
+        self.request = FakeRequest(responses)
+        context = type("Context", (), {"request": self.request})()
+        self.metrics = {}
+        self.paces = []
+        return HTTPFirstBrowser(context, self.page, timeout_error=FakeTimeout,
+                                pacer=lambda: self.paces.append(True), metrics=self.metrics)
+
+    def test_direct_pages_use_requests_and_browser_confirms_the_end(self):
+        first = FakeHTTPResponse(html=review_html() + f'<li class="a-last"><a href="{SECOND}">Next</a></li>')
+        second = FakeHTTPResponse(SECOND, review_html("Another fictional review"))
+        tool = self.tool([first, second])
+        self.assertEqual(tool.load(FIRST).next_url, SECOND)
+        self.assertFalse(tool.advance().has_next)
+        self.assertIsNone(tool.advance())
+        self.assertEqual([call[0] for call in self.page.loads], [SECOND])
+        self.assertEqual(self.metrics["http_pages"], 2)
+        self.assertTrue(first.disposed and second.disposed)
+        self.assertTrue(all(call[1]["max_redirects"] == 0 and call[1]["max_retries"] == 0
+                            for call in self.request.calls))
+
+    def test_reviews_without_html_next_do_not_prove_the_collection_is_complete(self):
+        tool = self.tool([FakeHTTPResponse()])
+        self.page.controls[NEXT_SELECTORS[0]] = [FakeControl(SECOND)]
+        snapshot = tool.load(FIRST)
+        self.assertTrue(snapshot.has_next)
+        self.assertEqual(snapshot.next_url, SECOND)
+        self.assertEqual([call[0] for call in self.page.loads], [FIRST])
+
+    def test_unknown_html_and_javascript_pagination_fall_back_at_same_url(self):
+        for html in ["<h1>JavaScript required</h1>", review_html() + '<button data-hook="show-more-button">More</button>']:
+            with self.subTest(html=html):
+                response = FakeHTTPResponse(html=html)
+                tool = self.tool([response])
+                snapshot = tool.load(FIRST)
+                self.assertEqual(snapshot.url, FIRST)
+                self.assertEqual([call[0] for call in self.page.loads], [FIRST])
+                self.assertEqual(self.metrics["browser_fallbacks"], 1)
+                self.assertTrue(response.disposed)
+
+    def test_access_blocks_never_trigger_browser_fallback(self):
+        for status in [403, 429]:
+            with self.subTest(status=status):
+                response = FakeHTTPResponse(status=status)
+                tool = self.tool([response])
+                with self.assertRaises(browser_tool.AccessBlockedError) as caught:
+                    tool.load(FIRST)
+                self.assertEqual(caught.exception.http_status, status)
+                self.assertEqual(self.page.loads, [])
+                self.assertTrue(response.disposed)
+        for html in ['<input id="ap_email">', '<input id="captchacharacters">']:
+            tool = self.tool([FakeHTTPResponse(html=html)])
+            self.assertEqual(tool.load(FIRST).html, html)
+            self.assertEqual(self.page.loads, [])
+
+    def test_redirects_are_same_product_bounded_and_disposed(self):
+        redirect = FakeHTTPResponse(status=302, headers={"location": SECOND})
+        page = FakeHTTPResponse(SECOND)
+        tool = self.tool([redirect, page])
+        self.assertEqual(tool.load(FIRST).url, SECOND)
+        self.assertTrue(redirect.disposed and page.disposed)
+        for target in [OTHER, "https://example.com/", "https://amazon.in.evil.test/", "http://www.amazon.in/", "https://www.amazon.in:443/product-reviews/B0DEMO0001"]:
+            with self.subTest(target=target):
+                response = FakeHTTPResponse(status=302, headers={"location": target})
+                tool = self.tool([response])
+                with self.assertRaises(ValueError):
+                    tool.load(FIRST)
+                self.assertEqual(len(self.request.calls), 1)
+                self.assertEqual(self.page.loads, [])
+                self.assertTrue(response.disposed)
+
+    def test_login_redirect_stops_without_loading_sign_in_or_browser(self):
+        response = FakeHTTPResponse(status=302, headers={"location": "/ap/signin"})
+        tool = self.tool([response])
+        self.assertIn("ap_email", tool.load(FIRST).html)
+        self.assertEqual(len(self.request.calls), 1)
+        self.assertEqual(self.page.loads, [])
+        self.assertTrue(response.disposed)
+
+    def test_response_origin_next_product_and_size_are_validated(self):
+        responses = [FakeHTTPResponse(url="https://example.com/"),
+                     FakeHTTPResponse(html=review_html() + f'<a data-hook="pagination-bar-next" href="{OTHER}">Next</a>'),
+                     FakeHTTPResponse(headers={"content-length": "999999999"}),
+                     FakeHTTPResponse(headers={"content-type": "application/json"})]
+        for response in responses:
+            with self.subTest(response=response.headers):
+                tool = self.tool([response])
+                with self.assertRaises(ValueError):
+                    tool.load(FIRST)
+                self.assertTrue(response.disposed)
+                self.assertEqual(self.page.loads, [])
+
+    def test_disabled_next_control_is_not_followed(self):
+        tool = self.tool([FakeHTTPResponse(html=review_html() + f'<li class="a-last a-disabled"><a href="{SECOND}">Next</a></li>')])
+        self.assertFalse(tool.load(FIRST).has_next)
+        self.assertIsNone(tool.advance())
+
 
 
 if __name__ == "__main__":

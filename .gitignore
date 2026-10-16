@@ -1,5 +1,6 @@
 auth.json
 .auth-*.json
+worker.lock
 debug_review_*.html
 *.sqlite3
 *.sqlite3-*

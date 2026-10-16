@@ -60,6 +60,8 @@ def collect_product(
     resume: bool = False,
     restart: bool = False,
     replay_limit: int = 20,
+    on_progress=None,
+    cancelled=None,
 ) -> dict:
     """Collect at most max_pages new snapshots; commit rows with their cursor.
 
@@ -96,8 +98,8 @@ def collect_product(
             durable_position = (persisted["next_url"], persisted["replay_steps"], persisted["pages_completed"])
         cursor_url, cursor_steps, pages_completed = durable_position
 
-    def save(status: str, detail: str, rows=()) -> dict:
-        nonlocal durable_position, cursor_url, cursor_steps, pages_completed
+    def save(status: str, detail: str, rows=(), *, page=False) -> dict:
+        nonlocal durable_position, cursor_url, cursor_steps, pages_completed, inserted, processed
         try:
             counts = store.save_page(
                 asin, rows, next_url=cursor_url, pages_completed=pages_completed,
@@ -108,6 +110,17 @@ def collect_product(
             restore_committed_position()
             raise
         durable_position = (cursor_url, cursor_steps, pages_completed)
+        if page:
+            inserted += counts["inserted"]
+            processed += 1
+        if on_progress is not None:
+            # Reporting observes committed state and cannot invalidate a saved page.
+            try:
+                on_progress({"asin": asin, "status": status, "detail": detail,
+                             "inserted": inserted, "pages_processed": processed,
+                             "pages_completed": pages_completed})
+            except Exception:
+                pass
         return counts
 
     def result(status: str, detail: str) -> dict:
@@ -115,6 +128,13 @@ def collect_product(
             "asin": asin, "status": status, "skipped": False,
             "inserted": inserted, "pages_processed": processed, "detail": detail,
         }
+
+    def cancellation():
+        if cancelled is None or not cancelled():
+            return None
+        detail = "Cancelled. Committed reviews and the saved cursor are retained."
+        save("paused", detail)
+        return {**result("paused", detail), "cancelled": True}
 
     # Validate persisted cursors before any browser action.
     if extract_asin(cursor_url) != asin:
@@ -128,9 +148,18 @@ def collect_product(
         return result("paused", detail)
 
     try:
+        stopped = cancellation()
+        if stopped:
+            return stopped
         save("in_progress", "Opening saved collection position.")
+        stopped = cancellation()
+        if stopped:
+            return stopped
         snapshot = browser.load(cursor_url)
         for _ in range(cursor_steps):
+            stopped = cancellation()
+            if stopped:
+                return stopped
             state, detail = detect_page_state(snapshot.html, snapshot.title)
             if state in {"login", "captcha"}:
                 save("blocked", detail)
@@ -150,6 +179,9 @@ def collect_product(
                 return result("partial", detail)
 
         while processed < max_pages:
+            stopped = cancellation()
+            if stopped:
+                return stopped
             state, detail = detect_page_state(snapshot.html, snapshot.title)
             if state in {"login", "captcha"}:
                 save("blocked", detail)
@@ -185,7 +217,7 @@ def collect_product(
                 if snapshot.next_url is not None:
                     if extract_asin(snapshot.next_url) != asin:
                         detail = "Pagination points outside the current Amazon.in product."
-                        inserted += save("failed", detail, rows)["inserted"]
+                        save("failed", detail, rows, page=True)
                         return result("failed", detail)
                     cursor_url, cursor_steps = snapshot.next_url, 0
                 else:
@@ -201,8 +233,13 @@ def collect_product(
                 status = "complete"
                 detail = "All visible reviews saved; no supported next control found. Coverage is not guaranteed."
             pages_completed += 1
-            inserted += save(status, detail, rows)["inserted"]
-            processed += 1
+            save(status, detail, rows, page=True)
+            # A terminal page remains complete even if cancellation arrived as it
+            # committed. Otherwise the next durable cursor is safe to resume.
+            if status != "complete":
+                stopped = cancellation()
+                if stopped:
+                    return stopped
             if status in {"paused", "complete"}:
                 return result(status, detail)
             snapshot = browser.advance()
@@ -216,8 +253,18 @@ def collect_product(
         raise
     except Exception as exc:
         restore_committed_position()
-        detail = f"{type(exc).__name__}: {exc}"[:1000]
-        save("failed", detail)
-        return result("failed", detail)
+        stopped = cancellation()
+        if stopped:
+            return stopped
+        http_status = getattr(exc, "http_status", None)
+        status = "blocked" if http_status in {403, 429} else "failed"
+        # Browser request diagnostics can include authenticated request headers.
+        # Only public failure information belongs in checkpoints or UI events.
+        detail = (f"Amazon returned HTTP {http_status}; collection stopped for access review."
+                  if status == "blocked" else
+                  f"{type(exc).__name__}: Collection could not save the next page. "
+                  "The saved cursor is retained. Check the browser setup or retry later.")
+        save(status, detail)
+        return result(status, detail)
 
     raise RuntimeError("Unexpected collection exit")

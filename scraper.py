@@ -5,45 +5,27 @@ Amazon. Browser imports are deliberately confined to the live commands below.
 """
 
 import argparse
-import json
 from pathlib import Path
 import sys
-import tempfile
+from threading import Event
 
-from browser_tool import PlaywrightBrowser
-from collector import collect_product, load_input_urls
-from review_parser import detect_page_state
+from collection_runtime import run_auth, run_collection
+from collector import load_input_urls
 from review_store import ReviewStore
 
 
 def authenticate(auth_file: Path):
-    from playwright.sync_api import sync_playwright
+    finished = Event()
 
-    auth_file.parent.mkdir(parents=True, exist_ok=True)
-    temporary = None
-    try:
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=False)
-            try:
-                context = browser.new_context(locale="en-IN")
-                page = context.new_page()
-                page.goto("https://www.amazon.in/", wait_until="domcontentloaded", timeout=30000)
-                input("Sign in manually in the browser. Once signed in, press Enter here to save the session: ")
-                state, _ = detect_page_state(page.content(), page.title())
-                if state in {"login", "captcha"}:
-                    raise ValueError("Login or CAPTCHA is still visible; no session was saved.")
-                # Store state atomically. Session validity is checked again by live pages.
-                with tempfile.NamedTemporaryFile(dir=auth_file.parent, prefix=".auth-", suffix=".json", delete=False) as handle:
-                    temporary = Path(handle.name)
-                context.storage_state(path=str(temporary))
-                temporary.replace(auth_file)
-                temporary = None
-            finally:
-                browser.close()
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-    print(f"Browser session saved to {auth_file}. This file contains private session data.")
+    def confirm(event):
+        if event.get("status") == "awaiting_login":
+            input("Sign in manually in the browser. Once signed in, press Enter here to save the session: ")
+            finished.set()
+
+    report = run_auth(auth_file, finished, None, on_progress=confirm)
+    if report["status"] != "completed":
+        raise ValueError(report["detail"])
+    print("Browser session saved locally. This file contains private session data.")
 
 
 def positive(value):
@@ -65,6 +47,10 @@ def build_parser():
     parser.add_argument("--pages", type=positive, default=3, help="New snapshots per product in this invocation")
     parser.add_argument("--replay-limit", type=positive, default=20, help="Maximum earlier show-more clicks when restoring a saved position")
     parser.add_argument("--headful", action="store_true", help="Show the collection browser")
+    parser.add_argument("--transport", choices=("browser", "hybrid"), default="browser",
+                        help="Browser rendering or experimental same-session HTML first")
+    parser.add_argument("--delay", type=float, default=1.0, help="Minimum seconds between request starts (0 to 60)")
+    parser.add_argument("--full-assets", action="store_true", help="Load images, fonts and media during collection")
     progress = parser.add_mutually_exclusive_group()
     progress.add_argument("--resume", action="store_true", help="Continue saved positions; skip completed products")
     progress.add_argument("--restart", action="store_true", help="Restart positions; retain stored reviews")
@@ -79,43 +65,28 @@ def main(argv=None):
             authenticate(args.auth_file)
             return 0
         urls = load_input_urls(args.input)
-        if not args.auth_file.is_file():
-            raise ValueError("No saved session. Use --auth to sign in manually first.")
-        # Fail early for malformed session JSON without printing private contents.
-        try:
-            session = json.loads(args.auth_file.read_text(encoding="utf-8"))
-            if not isinstance(session, dict) or not isinstance(session.get("cookies"), list) or not isinstance(session.get("origins"), list):
-                raise ValueError
-        except (ValueError, UnicodeError):
-            raise ValueError("Saved session file is invalid; refresh it with --auth.") from None
         if args.output is not None and args.output.resolve() in {args.auth_file.resolve(), args.input.resolve()}:
             raise ValueError("CSV output cannot replace the session or input file.")
         if args.db.resolve() in {args.auth_file.resolve(), args.input.resolve()}:
             raise ValueError("Database cannot replace the session or input file.")
 
-        from playwright.sync_api import sync_playwright
+        def report_product(event):
+            if event.get("event") == "product_finished":
+                print(f"{event['asin']}: {event['status']}; new reviews {event['inserted']}; processed snapshots {event['pages_processed']}")
+                print("  " + event["detail"])
 
-        failed = False
-        with ReviewStore(args.db) as store, sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=not args.headful)
-            try:
-                context = browser.new_context(storage_state=str(args.auth_file), locale="en-IN", viewport={"width": 1280, "height": 800})
-                tool = PlaywrightBrowser(context.new_page())
-                for url in urls:
-                    report = collect_product(tool, store, url, max_pages=args.pages, resume=args.resume, restart=args.restart, replay_limit=args.replay_limit)
-                    print(f"{report['asin']}: {report['status']}; new reviews {report['inserted']}; processed snapshots {report['pages_processed']}")
-                    print("  " + report["detail"])
-                    failed = failed or report["status"] in {"failed", "blocked", "partial"}
-                    if report["status"] == "blocked":
-                        print("Collection stopped for manual session review. No further products will be requested.")
-                        break
-            finally:
-                try:
-                    browser.close()
-                finally:
-                    if args.output is not None:
-                        print(f"Exported {store.export_csv(args.output)} reviews to {args.output}")
-        return 1 if failed else 0
+        report = run_collection(
+            urls, args.db, args.auth_file, max_pages=args.pages,
+            resume=args.resume, restart=args.restart, replay_limit=args.replay_limit,
+            transport=args.transport, delay=args.delay, headful=args.headful,
+            lightweight=not args.full_assets, on_progress=report_product,
+        )
+        if report.get("detail"):
+            print(report["detail"])
+        if args.output is not None and args.db.is_file():
+            with ReviewStore(args.db, read_only=True) as store:
+                print(f"Exported {store.export_csv(args.output)} reviews to {args.output}")
+        return 1 if report["status"] in {"failed", "blocked", "partial"} else 0
     except KeyboardInterrupt:
         print("Interrupted. Saved database progress is retained.", file=sys.stderr)
         return 130

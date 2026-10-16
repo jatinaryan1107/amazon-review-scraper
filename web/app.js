@@ -3,7 +3,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const svgNS = "http://www.w3.org/2000/svg";
-  const validViews = new Set(["overview", "reviews", "products", "collection"]);
+  const validViews = new Set(["overview", "reviews", "products", "collection", "analysis"]);
   function preference(key) {
     try { return localStorage.getItem(key); } catch { return null; }
   }
@@ -14,12 +14,17 @@
     overviewController: null, reviewController: null, file: null,
     importing: false, exporting: false, toastTimer: null, searchTimer: null,
     overviewVersion: 0, reviewVersion: 0,
+    overviewError: null, automation: null, automationVersion: 0, automationController: null,
+    automationPromise: null, automationPending: false,
+    pollTimer: null, mutation: false, jobStatuses: new Map(), jobRenderKey: "", analysisJobKey: "",
+    analysis: null, analysisVersion: 0, analysisController: null, analysisLoading: false,
   };
   const viewCopy = {
     overview: ["Review overview", "Explore feedback, compare products, and keep the evidence close."],
     reviews: ["Every review, in focus.", "Find the feedback you need. Open any review to see the full story."],
     products: ["Your products", "Compare the feedback, then explore the reviews behind each product."],
-    collection: ["Collection history", "Keep track of saved collection progress and where things stand."],
+    collection: ["Collect. Save. Understand.", "Bring product reviews into your workspace, with progress you can pick up again."],
+    analysis: ["From feedback to findings", "Explore patterns, see the limits, and check the reviews behind every theme."],
   };
   const number = (value) => new Intl.NumberFormat().format(Number(value) || 0);
   const average = (value) => value === null || value === undefined || value === "" ? "N/A" : Number(value).toFixed(1);
@@ -77,11 +82,21 @@
   }
   async function request(url, options = {}) {
     let response;
+    const controller = new AbortController(), parentSignal = options.signal;
+    let timedOut = false;
+    const abort = () => controller.abort();
+    if (parentSignal?.aborted) controller.abort();
+    else parentSignal?.addEventListener("abort", abort, { once: true });
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 20000);
     try {
-      response = await fetch(url, { cache: "no-store", ...options });
+      response = await fetch(url, { cache: "no-store", ...options, signal: controller.signal });
     } catch (error) {
+      if (timedOut) throw new Error("The local server took too long to respond. Check its terminal, then try again.");
       if (error.name === "AbortError") throw error;
       throw new Error("The local server could not be reached. Make sure it is running, then try again.");
+    } finally {
+      clearTimeout(timeout);
+      parentSignal?.removeEventListener("abort", abort);
     }
     if (!response.ok) {
       let message = `The request failed (${response.status}). Please try again.`;
@@ -113,7 +128,10 @@
     if (!validViews.has(view)) view = "overview";
     const changed = state.view !== view;
     state.view = view;
-    document.querySelectorAll(".view").forEach((section) => { section.hidden = section.id !== `view-${view}` || !state.overview; });
+    document.querySelectorAll(".view").forEach((section) => { section.hidden = section.id !== `view-${view}` || (!state.overview && !["collection", "analysis"].includes(view)); });
+    $("page-error").hidden = !state.overviewError || ["collection", "analysis"].includes(view);
+    $("loading-panel").hidden = Boolean(state.overview) || ["collection", "analysis"].includes(view) || Boolean(state.overviewError);
+    if (["collection", "analysis"].includes(view)) $("main-content").setAttribute("aria-busy", "false");
     document.querySelectorAll("[data-view]").forEach((link) => {
       const active = link.dataset.view === view;
       link.classList.toggle("active", active);
@@ -127,6 +145,8 @@
     setMenu(false);
     if (location.hash !== `#${view}`) history.replaceState(null, "", `#${view}`);
     if (view === "reviews" && state.overview && (changed || !state.reviews)) loadReviews();
+    if (view === "analysis" && changed) loadAnalysis();
+    if (view === "collection" && changed) loadAutomation();
     if (changed) window.scrollTo({ top: 0, left: 0, behavior: "auto" });
     if (focus) $("main-content").focus({ preventScroll: true });
   }
@@ -136,6 +156,13 @@
     state.reviews = null;
     syncFilters();
   }
+  function renderDatasetContext() {
+    const demo = state.dataset === "demo", banner = $("provenance-banner");
+    $("breadcrumb-workspace").textContent = demo ? "Demo workspace" : "My workspace";
+    banner.classList.toggle("workspace-banner", !demo);
+    banner.querySelector("p").replaceChildren(node("strong", "", demo ? "Demo workspace" : "Your local workspace"), node("span", "", demo ? "You're exploring fictional reviews. Import or collect reviews to work with your own data." : "Reviews and saved reports are stored on this device. External analysis only runs when you choose it."));
+    banner.querySelector(".badge").textContent = demo ? "SAMPLE DATA" : "LOCAL DATA";
+  }
   function syncFilters() {
     $("review-search").value = state.filters.q;
     $("product-filter").value = state.filters.asin;
@@ -144,31 +171,40 @@
     $("review-sort").value = state.filters.sort;
     $("clear-filters").hidden = !state.filters.q && !state.filters.asin && state.filters.rating === "all" && state.filters.verified === "all";
   }
-  async function loadOverview() {
+  async function loadOverview(silent = false) {
+    if (typeof silent !== "boolean") silent = false;
+    renderDatasetContext();
     state.overviewController?.abort();
     state.reviewController?.abort();
     state.overviewController = new AbortController();
     const version = ++state.overviewVersion;
     ++state.reviewVersion;
-    state.overview = null; state.reviews = null;
-    $("loading-panel").hidden = false;
+    if (!silent) { state.overview = null; state.reviews = null; }
+    state.overviewError = null;
+    $("loading-panel").hidden = silent || ["collection", "analysis"].includes(state.view);
     $("page-error").hidden = true;
     $("export-button").disabled = true;
-    document.querySelectorAll(".view").forEach((section) => { section.hidden = true; });
-    $("main-content").setAttribute("aria-busy", "true");
+    if (!silent) document.querySelectorAll(".view").forEach((section) => { section.hidden = section.id !== `view-${state.view}` || !["collection", "analysis"].includes(state.view); });
+    $("main-content").setAttribute("aria-busy", String(!["collection", "analysis"].includes(state.view)));
     try {
       const response = await request(`/api/overview?${queryString()}`, { signal: state.overviewController.signal });
       const data = await response.json();
       if (version !== state.overviewVersion) return;
       state.overview = data;
+      state.overviewError = null;
       connection(true);
       renderOverview();
       navigate(state.view);
     } catch (error) {
       if (error.name === "AbortError" || version !== state.overviewVersion) return;
       connection(false);
+      state.overviewError = error.message;
       $("page-error-message").textContent = error.message || "Please check that the local server is still running.";
-      $("page-error").hidden = false;
+      $("page-error").hidden = ["collection", "analysis"].includes(state.view);
+      if (!state.overview) {
+        $("collection-list").replaceChildren();
+        empty($("collection-empty"), "Saved product progress is unavailable", "Collection controls still work. Check the local database or server terminal, then refresh this section.", "info");
+      }
     } finally {
       if (version === state.overviewVersion) {
         $("loading-panel").hidden = true;
@@ -185,7 +221,7 @@
     const banner = $("provenance-banner");
     banner.classList.toggle("workspace-banner", !data.dataset.is_demo);
     const description = banner.querySelector("p");
-    description.replaceChildren(node("strong", "", data.dataset.is_demo ? "Demo workspace" : "Your local workspace"), node("span", "", data.dataset.is_demo ? "You're exploring fictional reviews. Import a CSV to work with your own data." : "Your imported reviews are stored on this device. No AI analysis has been performed."));
+    description.replaceChildren(node("strong", "", data.dataset.is_demo ? "Demo workspace" : "Your local workspace"), node("span", "", data.dataset.is_demo ? "You're exploring fictional reviews. Import or collect reviews to work with your own data." : "Reviews and saved reports are stored on this device. External analysis only runs when you choose it."));
     banner.querySelector(".badge").textContent = data.dataset.is_demo ? "SAMPLE DATA" : "LOCAL DATA";
     $("updated-label").textContent = data.last_updated ? `Data added ${dateLabel(data.last_updated)}` : "Stored on this device";
     renderStats(summary);
@@ -201,6 +237,7 @@
     }
     if (!data.products.some((p) => p.asin === state.filters.asin)) state.filters.asin = "";
     syncFilters();
+    syncAnalysisProducts();
   }
   function renderStats(summary) {
     const specs = [
@@ -314,7 +351,8 @@
       return card;
     }));
     $("collection-empty").hidden = checkpoints.length > 0;
-    if (!checkpoints.length) empty($("collection-empty"), "No collection jobs yet", state.overview.dataset.is_demo ? "This demo uses fictional reviews. Saved scraper checkpoints will appear in My workspace after you run a collection separately." : "Saved progress will appear here after a collection is run separately. You can import a CSV now to explore existing reviews.", "layers");
+    $("checkpoint-description").textContent = `Collection positions in ${state.overview.dataset.name}`;
+    if (!checkpoints.length) empty($("collection-empty"), "No saved product positions", state.overview.dataset.is_demo ? "Demo reviews are fictional. Live collection saves product progress in My workspace." : "Each collected page saves a position here. CSV imports do not create collection checkpoints.", "layers");
   }
   async function loadReviews() {
     state.reviewController?.abort();
@@ -353,7 +391,7 @@
       if (version === state.reviewVersion) { $("reviews-loading").hidden = true; $("view-reviews").setAttribute("aria-busy", "false"); }
     }
   }
-  function showReview(review) {
+  function showReview(review, dataset = state.dataset) {
     const container = $("review-detail"); container.replaceChildren();
     const product = node("div", "detail-product"); product.append(icon("box"), node("span", "", productName(review.asin)));
     const title = node("h2", "", review.review_title || "Untitled review"); title.id = "detail-title";
@@ -367,7 +405,7 @@
       const field = node("div"); field.append(node("dt", "", label), node("dd", "", value)); details.append(field);
     }
     container.append(product, title, rating, byline, body, details);
-    if (state.overview.dataset.is_demo) container.append(node("p", "detail-demo-note", "This is a fictional review created for the demo. It is not customer evidence."));
+    if (dataset === "demo") container.append(node("p", "detail-demo-note", "This is a fictional review created for the demo. It is not customer evidence."));
     else {
       try {
         const url = new URL(review.product_url);
@@ -417,10 +455,13 @@
       const message = `${plural(data.inserted, "review")} imported. ${plural(data.duplicates, "duplicate")} skipped. ${plural(data.total_reviews, "review")} now in My workspace.`;
       importMessage(message);
       state.dataset = "workspace"; $("dataset-select").value = "workspace"; savePreference("reviewdesk-dataset", "workspace");
+      $("analysis-consent").checked = false; $("analysis-product").value = "";
+      updateWorkflowControls();
       resetFilters();
       state.file = null; $("csv-file").value = "";
       $("file-label").textContent = "Choose another CSV or drop it here"; $("file-description").textContent = "UTF-8 CSV, up to 5 MB";
       await loadOverview();
+      loadAnalysis();
       toast(message);
     } catch (error) { importMessage(error.message || "We couldn't import this CSV. Please try again.", true); }
     finally {
@@ -442,6 +483,380 @@
       toast("Your spreadsheet-safe CSV is ready.");
     } catch (error) { toast(error.message || "We couldn't export your reviews. Please try again."); }
     finally { state.exporting = false; $("export-button").disabled = !state.overview; label.textContent = "Export CSV"; }
+  }
+  const activeStatuses = new Set(["queued", "running", "cancelling"]);
+  const retryStatuses = new Set(["paused", "blocked", "failed", "cancelled", "interrupted"]);
+  const jobLabels = { collection: "Review collection", analysis: "Review analysis", auth: "Manual sign-in" };
+  function messageAt(id, message) {
+    $(id).textContent = message || "";
+    $(id).hidden = !message;
+  }
+  function timeLabel(value) {
+    if (!value) return "Just now";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  }
+  function syncAnalysisProducts() {
+    const select = $("analysis-product"), selected = select.value;
+    const products = state.overview?.products || [];
+    const key = JSON.stringify(products.map((product) => [product.asin, product.name]));
+    if (select.dataset.products === key) return;
+    select.dataset.products = key;
+    const all = node("option", "", "All products"); all.value = "";
+    select.replaceChildren(all);
+    for (const product of products) {
+      const option = node("option", "", product.name || product.asin);
+      option.value = product.asin; select.append(option);
+    }
+    select.value = products.some((product) => product.asin === selected) ? selected : "";
+  }
+  function updateWorkflowControls() {
+    const data = state.automation, active = data?.active_job;
+    const busy = Boolean(active && activeStatuses.has(active.status));
+    const browserReady = Boolean(data?.capabilities?.playwright_installed);
+    const sessionReady = data?.auth?.status === "saved";
+    $("auth-start").disabled = !data || state.mutation || busy || !browserReady;
+    $("auth-start").lastElementChild.textContent = sessionReady ? "Refresh sign-in" : "Open sign-in";
+    $("collection-submit").disabled = !data || state.mutation || busy || !browserReady || !sessionReady;
+    $("collection-submit").lastElementChild.textContent = state.mutation ? "Please wait..." : "Start collection";
+    const configured = Boolean(data?.capabilities?.openai_configured);
+    $("openai-option").disabled = !configured;
+    $("openai-option").textContent = configured ? `OpenAI${data.capabilities.model ? ` (${data.capabilities.model})` : ""}` : "OpenAI, not configured";
+    if (!configured && $("analysis-method").value === "openai") $("analysis-method").value = "local";
+    const external = $("analysis-method").value === "openai";
+    $("analysis-consent-wrap").hidden = !external;
+    $("analysis-method-help").textContent = external ? "OpenAI interprets the selected review text. Check source evidence and review the provider's output." : "Local analysis groups common terms and uses review ratings. It does not call a language model.";
+    $("analysis-submit").disabled = !data || state.mutation || busy || (external && (!configured || !$("analysis-consent").checked));
+    $("analysis-submit").lastElementChild.textContent = state.mutation ? "Please wait..." : "Run analysis";
+    $("browser-setup").hidden = !data || browserReady;
+    $("jobs-live-label").hidden = !busy;
+  }
+  function jobAction(label, job, action, iconName) {
+    const control = button(label, "button button-white button-small", action, iconName);
+    control.dataset.jobId = job.id; control.dataset.jobAction = label;
+    control.disabled = state.mutation;
+    return control;
+  }
+  function jobCard(job, compact = false) {
+    const card = node("article", `panel job-card${compact ? " compact-job" : ""}`);
+    const header = node("div", "job-header"), identity = node("div", "job-identity");
+    const mark = node("span", "job-mark"); mark.append(icon(job.kind === "analysis" ? "spark" : job.kind === "auth" ? "shield" : "layers"));
+    const copy = node("div"); copy.append(node("h3", "", jobLabels[job.kind] || "Background job"), node("p", "job-date", timeLabel(job.created_at)));
+    identity.append(mark, copy);
+    const badge = node("span", `badge job-status status-${job.status}`, String(job.status || "unknown").replaceAll("_", " ").toUpperCase());
+    header.append(identity, badge); card.append(header);
+    const isActive = activeStatuses.has(job.status), progress = job.progress || {};
+    if (isActive) {
+      const phase = node("div", "job-phase");
+      if (job.status !== "cancelling") phase.append(node("span", "spinner"));
+      phase.append(node("strong", "", job.status === "cancelling" ? "Stopping after the current operation" : String(job.phase || "Waiting to start").replaceAll("_", " ")));
+      if (progress.current_asin) phase.append(node("code", "", progress.current_asin));
+      card.append(phase);
+    }
+    if (job.kind === "collection") {
+      const metrics = node("dl", "job-metrics");
+      const values = [["Products finished", `${number(progress.products_done)} / ${number(progress.products_total || job.options?.urls?.length)}`], ["Pages saved", number(progress.pages_processed)], ["New reviews", number(progress.reviews_inserted)]];
+      for (const [label, value] of values) { const item = node("div"); item.append(node("dd", "", value), node("dt", "", label)); metrics.append(item); }
+      card.append(metrics);
+    }
+    if (job.detail) card.append(node("p", "job-detail", job.detail));
+    if (job.error && job.error !== job.detail) card.append(node("p", "job-error", job.error));
+    const actions = node("div", "job-actions");
+    if (isActive && job.kind === "auth" && job.status === "running" && job.phase === "awaiting_login") {
+      const note = node("p", "field-help", "Complete sign-in in the opened browser, then save the session here."); card.append(note);
+      actions.append(jobAction("Save signed-in session", job, () => mutateJob(job, "finish"), "check"));
+    }
+    if (isActive) {
+      const stop = jobAction(job.status === "cancelling" ? "Stopping..." : "Stop job", job, () => mutateJob(job, "cancel"), "close");
+      stop.disabled = state.mutation || job.status === "cancelling"; actions.append(stop);
+    } else if (retryStatuses.has(job.status) && job.kind === "collection") {
+      actions.append(jobAction("Resume collection", job, () => fillCollection(job), "refresh"));
+    }
+    if (!isActive && job.result?.analysis_id) actions.append(jobAction("View analysis", job, () => {
+      const dataset = job.options?.dataset || "workspace";
+      if (["demo", "workspace"].includes(dataset) && dataset !== state.dataset) chooseDataset(dataset);
+      $("analysis-product").value = job.options?.asin || "";
+      navigate("analysis", true); loadAnalysis();
+    }, "arrow"));
+    if (actions.children.length) card.append(actions);
+    return card;
+  }
+  function preserveJobFocus(container, render) {
+    const focused = container.contains(document.activeElement) ? document.activeElement : null;
+    const id = focused?.dataset.jobId, action = focused?.dataset.jobAction;
+    render();
+    if (id && action) [...container.querySelectorAll("button[data-job-id]")].find((control) => control.dataset.jobId === id && control.dataset.jobAction === action && !control.disabled)?.focus({ preventScroll: true });
+  }
+  function renderAutomation() {
+    const data = state.automation;
+    if (!data) return;
+    const auth = data.auth || {}, status = auth.status || "missing";
+    $("auth-status").textContent = status === "saved" ? "SESSION SAVED" : status.toUpperCase();
+    $("auth-status").className = `badge auth-${status}`;
+    $("auth-detail").textContent = auth.detail || (status === "saved" ? "A session is saved on this device. Collection checks whether Amazon still accepts it." : "Open sign-in to save an Amazon session on this device.");
+    const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+    const active = data.active_job;
+    const displayed = active ? [active, ...jobs.filter((job) => job.id !== active.id)].slice(0, 8) : jobs.slice(0, 8);
+    const key = JSON.stringify([displayed, state.mutation]);
+    if (state.jobRenderKey !== key) {
+      state.jobRenderKey = key;
+      preserveJobFocus($("job-list"), () => $("job-list").replaceChildren(...displayed.map((job) => jobCard(job))));
+    }
+    $("jobs-empty").hidden = displayed.length > 0;
+    if (!displayed.length) empty($("jobs-empty"), "Ready when you are", "Your sign-in, collection, and analysis jobs will appear here.", "layers");
+    const analysisJob = active?.kind === "analysis" || active?.phase === "analysing" ? active : null;
+    $("analysis-job").hidden = !analysisJob;
+    const analysisKey = JSON.stringify([analysisJob, state.mutation]);
+    if (state.analysisJobKey !== analysisKey) {
+      state.analysisJobKey = analysisKey;
+      preserveJobFocus($("analysis-job"), () => $("analysis-job").replaceChildren(...(analysisJob ? [jobCard(analysisJob, true)] : [])));
+    }
+    updateWorkflowControls();
+  }
+  function schedulePoll() {
+    clearTimeout(state.pollTimer);
+    if (document.hidden) return;
+    const busy = state.automation?.active_job && activeStatuses.has(state.automation.active_job.status);
+    state.pollTimer = setTimeout(loadAutomation, busy ? 2000 : 10000);
+  }
+  async function loadAutomation() {
+    clearTimeout(state.pollTimer);
+    if (state.automationPromise) {
+      state.automationPending = true;
+      return state.automationPromise;
+    }
+    state.automationPending = false;
+    const operation = readAutomation();
+    state.automationPromise = operation;
+    try { await operation; }
+    finally {
+      state.automationPromise = null;
+      const again = state.automationPending;
+      state.automationPending = false;
+      if (again && !document.hidden) await loadAutomation();
+      else schedulePoll();
+    }
+  }
+  async function readAutomation() {
+    state.automationController?.abort();
+    state.automationController = new AbortController();
+    const version = ++state.automationVersion;
+    try {
+      const response = await request("/api/automation", { signal: state.automationController.signal });
+      const data = await response.json();
+      if (version !== state.automationVersion) return;
+      const jobs = [...(data.jobs || []), ...(data.active_job ? [data.active_job] : [])];
+      let refreshData = false, refreshAnalysis = false;
+      for (const job of jobs) {
+        const previous = state.jobStatuses.get(job.id);
+        if (previous && activeStatuses.has(previous.status) && !activeStatuses.has(job.status)) {
+          toast(`${jobLabels[job.kind] || "Job"}: ${String(job.status).replaceAll("_", " ")}.`);
+          refreshData ||= job.kind === "collection";
+          refreshAnalysis ||= job.kind === "analysis" || Boolean(job.result?.analysis_id);
+        }
+        if (job.kind === "collection" && previous && previous.inserted !== job.progress?.reviews_inserted) refreshData = true;
+        state.jobStatuses.set(job.id, { status: job.status, inserted: job.progress?.reviews_inserted });
+      }
+      state.automation = data;
+      $("automation-error-message").textContent = ""; $("automation-error").hidden = true;
+      renderAutomation();
+      if (refreshData && state.dataset === "workspace") {
+        $("analysis-consent").checked = false; updateWorkflowControls();
+        await loadOverview(true);
+        if (state.view === "reviews") loadReviews();
+      }
+      if (refreshAnalysis) loadAnalysis();
+    } catch (error) {
+      if (error.name === "AbortError" || version !== state.automationVersion) return;
+      $("automation-error-message").textContent = error.message;
+      $("automation-error-message").hidden = false;
+      $("automation-error").hidden = false;
+      $("jobs-live-label").hidden = true;
+    }
+  }
+  async function postJson(url, payload) {
+    const response = await request(url, { method: "POST", headers: { "Content-Type": "application/json", "X-Reviewdesk-Request": "1" }, body: JSON.stringify(payload) });
+    return response.json();
+  }
+  async function createJob(options, errorId) {
+    if (state.mutation) return null;
+    state.mutation = true; messageAt(errorId, ""); renderAutomation();
+    try {
+      const data = await postJson("/api/jobs", options);
+      const job = data.job || data;
+      state.jobStatuses.set(job.id, { status: job.status, inserted: job.progress?.reviews_inserted });
+      toast(`${jobLabels[job.kind] || "Job"} started.`);
+      return job;
+    } catch (error) { messageAt(errorId, error.message); return null; }
+    finally { state.mutation = false; updateWorkflowControls(); await loadAutomation(); }
+  }
+  async function mutateJob(job, action) {
+    if (state.mutation) return;
+    state.mutation = true; renderAutomation();
+    try {
+      await postJson(`/api/jobs/${encodeURIComponent(job.id)}/${action}`, {});
+      toast(action === "cancel" ? "Stop requested. Committed progress stays saved." : "Checking and saving the browser session...");
+    } catch (error) { toast(error.message); }
+    finally { state.mutation = false; await loadAutomation(); }
+  }
+  function chooseDataset(dataset) {
+    if (state.dataset === dataset) return;
+    clearTimeout(state.searchTimer);
+    state.dataset = dataset; $("dataset-select").value = dataset;
+    savePreference("reviewdesk-dataset", dataset); resetFilters();
+    $("analysis-product").replaceChildren(node("option", "", "All products")); $("analysis-product").firstElementChild.value = "";
+    delete $("analysis-product").dataset.products;
+    state.analysis = null; $("analysis-report").hidden = true;
+    $("analysis-consent").checked = false;
+    loadOverview(); loadAnalysis();
+  }
+  async function startCollection(event) {
+    event.preventDefault();
+    messageAt("collection-form-error", "");
+    let urls = $("collection-urls").value.split(/\r?\n/).map((url) => url.trim()).filter(Boolean);
+    const pages = Number($("collection-pages").value);
+    if (!urls.length) { messageAt("collection-form-error", "Add at least one Amazon India product URL."); return; }
+    const products = new Map();
+    for (const value of urls) {
+      try {
+        const url = new URL(value);
+        const match = url.pathname.match(/^\/(?:[^/]+\/)?(?:dp|product-reviews)\/([A-Za-z0-9]{10})(?:\/|$)/i);
+        if (!/^https:\/\/(?:www\.)?amazon\.in\//i.test(value) || /\s|[\u0000-\u001f\u007f]/.test(value) || url.protocol !== "https:" || !["amazon.in", "www.amazon.in"].includes(url.hostname) || url.username || url.password || url.port || !match) throw new Error();
+        if (!products.has(match[1].toUpperCase())) products.set(match[1].toUpperCase(), value);
+      } catch { messageAt("collection-form-error", "Use full HTTPS Amazon India product or review URLs with a 10-character ASIN."); return; }
+    }
+    urls = [...products.values()];
+    if (urls.length > 10) { messageAt("collection-form-error", "Use no more than 10 products in one run."); return; }
+    if (!Number.isInteger(pages) || pages < 1 || pages > 20 || urls.length * pages > 50) { messageAt("collection-form-error", "Choose 1 to 20 pages per product, with no more than 50 pages across this run."); return; }
+    const job = await createJob({ kind: "collection", urls, max_pages: pages, resume: $("collection-resume").checked, transport: $("collection-transport").value, analyse: $("collection-analyse").checked, analysis_method: "local", allow_external: false }, "collection-form-error");
+    if (job) { $("analysis-consent").checked = false; updateWorkflowControls(); chooseDataset("workspace"); }
+  }
+  function fillCollection(job) {
+    const options = job.options || {};
+    $("collection-urls").value = (options.urls || []).join("\n");
+    $("collection-pages").value = options.max_pages || 3;
+    $("collection-resume").checked = true;
+    $("collection-analyse").checked = options.analyse !== false;
+    $("collection-transport").value = options.transport === "hybrid" ? "hybrid" : "browser";
+    updateTransportHelp(); navigate("collection", true);
+    $("collection-urls").focus();
+    toast("Previous options restored. Review them, then start a run to resume saved progress.");
+  }
+  function updateTransportHelp() {
+    $("transport-help").textContent = $("collection-transport").value === "hybrid" ? "Tries lighter session requests, then falls back to the browser when needed. Login and CAPTCHA still stop collection." : "Uses your saved session in Chromium.";
+  }
+  async function loadAnalysis() {
+    state.analysisController?.abort(); state.analysisController = new AbortController();
+    const version = ++state.analysisVersion;
+    const params = new URLSearchParams({ dataset: state.dataset, asin: $("analysis-product").value });
+    state.analysisLoading = true; state.analysis = null;
+    $("analysis-report").hidden = true; $("analysis-empty").hidden = true;
+    $("analysis-error").hidden = true; $("analysis-loading").hidden = false;
+    try {
+      const response = await request(`/api/analysis?${params}`, { signal: state.analysisController.signal });
+      const data = await response.json();
+      if (version !== state.analysisVersion) return;
+      state.analysis = data; renderAnalysis();
+    } catch (error) {
+      if (error.name === "AbortError" || version !== state.analysisVersion) return;
+      $("analysis-error-message").textContent = error.message; $("analysis-error").hidden = false;
+    } finally {
+      if (version === state.analysisVersion) { state.analysisLoading = false; $("analysis-loading").hidden = true; }
+    }
+  }
+  async function startAnalysis(event) {
+    event.preventDefault();
+    const method = $("analysis-method").value, consent = $("analysis-consent").checked;
+    if (method === "openai" && !consent) { messageAt("analysis-form-error", "Choose local analysis or explicitly allow the selected review text to be sent to OpenAI."); return; }
+    const job = await createJob({ kind: "analysis", dataset: state.dataset, asin: $("analysis-product").value, analysis_method: method, allow_external: method === "openai" && consent }, "analysis-form-error");
+    if (job) $("analysis-consent").checked = false;
+    updateWorkflowControls();
+  }
+  async function openEvidence(evidence, dataset, control) {
+    if (control.disabled) return;
+    control.disabled = true;
+    try {
+      const params = new URLSearchParams({ dataset, asin: evidence.asin, review_id: evidence.review_id });
+      const response = await request(`/api/review?${params}`), data = await response.json();
+      showReview(data.review, dataset);
+    } catch (error) { toast(error.message || "This source review is no longer available."); }
+    finally { control.disabled = false; }
+  }
+  function renderAnalysis() {
+    const data = state.analysis, report = data?.report;
+    $("analysis-report").replaceChildren(); $("analysis-report").hidden = !report;
+    $("analysis-empty").hidden = Boolean(report);
+    if (!report) {
+      empty($("analysis-empty"), "The evidence comes first", "Run an analysis on the selected reviews to see themes, rating signals, and source evidence. Local analysis is free and stays on this device.", "spark");
+      return;
+    }
+    const container = $("analysis-report"), scope = report.scope || {}, ratings = report.rating_summary || {};
+    if (data.stale) {
+      const warning = node("div", "report-stale"); warning.append(icon("info"), node("p", "", "Reviews have changed since this report was generated. Run analysis again to update the findings.")); container.append(warning);
+    }
+    const intro = node("section", "panel report-intro"), topline = node("div", "report-topline");
+    topline.append(node("span", "eyebrow", "SAVED ANALYSIS"), node("span", "badge", report.method_label || report.method || "Analysis"));
+    intro.append(topline, node("h2", "", scope.asin ? `Feedback for ${scope.asin}` : "Your feedback, in perspective"), node("p", "report-summary", report.summary || "No summary was generated."));
+    const metadata = node("div", "report-metadata");
+    metadata.append(node("span", "", `${plural(scope.analysed_reviews, "review")} analysed of ${number(scope.total_reviews)}`), node("span", "", `Generated ${timeLabel(report.generated_at)}`), node("span", "", scope.dataset === "demo" ? "Fictional demo reviews" : "My workspace"));
+    intro.append(metadata);
+    if (Number(scope.excluded_reviews) > 0 || scope.body_truncated) intro.append(node("p", "report-scope-note", `${number(scope.excluded_reviews)} reviews excluded.${scope.body_truncated ? " Some review text was shortened for analysis." : ""} Findings describe the analysed sample.`));
+    container.append(intro);
+    const ratingSection = node("section", "report-rating-section"), ratingTitle = node("div", "section-title");
+    const ratingCopy = node("div"); ratingCopy.append(node("h2", "", "Rating signals"), node("p", "", "Based on star ratings, rather than inferred sentiment")); ratingTitle.append(ratingCopy); ratingSection.append(ratingTitle);
+    const ratingGrid = node("div", "analysis-rating-grid");
+    const metrics = [["Average rating", average(ratings.average), `${plural(ratings.rated, "rated review")}`], ["Positive ratings", number(ratings.positive), "4 to 5 stars"], ["Neutral ratings", number(ratings.neutral), "Above 2, below 4 stars"], ["Critical ratings", number(ratings.critical), "1 to 2 stars"]];
+    for (const [label, value, caption] of metrics) { const item = node("div", "panel analysis-stat"); item.append(node("span", "stat-heading", label), node("strong", "", value), node("span", "field-help", caption)); ratingGrid.append(item); }
+    ratingSection.append(ratingGrid); container.append(ratingSection);
+    const themesSection = node("section", "workflow-section"), title = node("div", "section-title"), titleCopy = node("div");
+    titleCopy.append(node("h2", "", "Themes in the reviews"), node("p", "", "Open the source reviews to check each finding")); title.append(titleCopy); themesSection.append(title);
+    const themes = Array.isArray(report.themes) ? report.themes : [];
+    if (!themes.length) { const noThemes = node("div", "panel empty-state compact"); empty(noThemes, "No supported themes yet", "There may be too little review text in this sample to identify a useful pattern.", "message"); themesSection.append(noThemes); }
+    else {
+      const grid = node("div", "theme-grid");
+      for (const [themeIndex, theme] of themes.entries()) {
+        const card = node("article", "panel theme-card"), heading = node("div", "theme-heading");
+        const countLabel = theme.count_basis === "cited_reviews" ? "cited review" : "matching review";
+        heading.append(node("h3", "", theme.label || "Review theme"), node("span", "badge", plural(theme.review_count, countLabel))); card.append(heading);
+        if (theme.explanation) card.append(node("p", "theme-explanation", theme.explanation));
+        if (theme.rating_mix && typeof theme.rating_mix === "object") {
+          const mix = theme.rating_mix, line = node("div", "theme-rating-mix");
+          line.append(node("span", "mix-label", theme.count_basis === "cited_reviews" ? "Cited review ratings" : "Matching review ratings"));
+          const bands = node("p", "", `${number(mix.positive)} at 4 to 5 stars · ${number(mix.neutral)} above 2, below 4 · ${number(mix.critical)} at 1 to 2 stars · ${number(mix.unrated)} unrated`);
+          line.append(bands); card.append(line);
+        }
+        const evidenceList = node("div", "theme-evidence");
+        const sources = (Array.isArray(theme.evidence) ? theme.evidence : []).slice(0, 8);
+        const moreSources = node("div", "theme-more-evidence");
+        moreSources.id = `theme-more-sources-${themeIndex}`; moreSources.hidden = true;
+        for (const [sourceIndex, evidence] of sources.entries()) {
+          const evidenceCard = node("div", "evidence-card"), quote = node("blockquote", "", evidence.quote || "Review evidence");
+          const action = button("Read source review", "text-button", () => openEvidence(evidence, scope.dataset || state.dataset, action), "arrow");
+          const source = node("div", "evidence-source"); source.append(node("code", "", evidence.asin || ""), action); evidenceCard.append(quote, source);
+          (sourceIndex < 3 ? evidenceList : moreSources).append(evidenceCard);
+        }
+        if (sources.length > 3) {
+          evidenceList.append(moreSources);
+          const toggle = button(`Show ${plural(sources.length - 3, "more source")}`, "text-button source-toggle", () => {
+            moreSources.hidden = !moreSources.hidden;
+            toggle.setAttribute("aria-expanded", String(!moreSources.hidden));
+            toggle.lastElementChild.textContent = moreSources.hidden ? `Show ${plural(sources.length - 3, "more source")}` : "Show fewer sources";
+          }, "down");
+          toggle.setAttribute("aria-expanded", "false"); toggle.setAttribute("aria-controls", moreSources.id);
+          evidenceList.append(toggle);
+        }
+        card.append(evidenceList); grid.append(card);
+      }
+      themesSection.append(grid);
+    }
+    container.append(themesSection);
+    const limitations = node("section", "panel report-limitations"), heading = node("div", "limitations-heading"); heading.append(icon("info"), node("h2", "", "Read this report with its limits")); limitations.append(heading);
+    const list = node("ul");
+    const notes = [...new Set(Array.isArray(report.limitations) ? report.limitations : [])];
+    if (scope.dataset === "demo" && !notes.some((note) => /fictional|demo data/i.test(String(note)))) notes.unshift("These reviews are fictional demo data. Findings are examples, not customer evidence.");
+    if (Number(ratings.unrated) > 0) notes.push(`${plural(ratings.unrated, "review")} had no rating and did not contribute to rating signals.`);
+    if (!notes.length) notes.push("Findings describe only the selected stored reviews. They do not establish complete coverage or product quality.");
+    for (const note of notes) list.append(node("li", "", note)); limitations.append(list); container.append(limitations);
   }
   function focusSearch() {
     navigate("reviews", true);
@@ -465,9 +880,7 @@
     if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
   });
   $("dataset-select").value = state.dataset;
-  $("dataset-select").addEventListener("change", () => {
-    clearTimeout(state.searchTimer); state.dataset = $("dataset-select").value; savePreference("reviewdesk-dataset", state.dataset); resetFilters(); loadOverview();
-  });
+  $("dataset-select").addEventListener("change", () => chooseDataset($("dataset-select").value));
   $("menu-toggle").addEventListener("click", () => setMenu(!$("sidebar").classList.contains("open")));
   $("sidebar-overlay").addEventListener("click", () => { setMenu(false); $("menu-toggle").focus(); });
   window.matchMedia("(min-width: 761px)").addEventListener("change", (event) => { if (event.matches) setMenu(false); });
@@ -509,6 +922,21 @@
     const transfer = new DataTransfer(); transfer.items.add(files[0]); $("csv-file").files = transfer.files;
   });
   $("import-form").addEventListener("submit", importFile);
+  $("collection-form").addEventListener("submit", startCollection);
+  $("collection-transport").addEventListener("change", updateTransportHelp);
+  $("auth-start").addEventListener("click", async () => {
+    const job = await createJob({ kind: "auth" }, "auth-form-error");
+    if (job) navigate("collection", true);
+  });
+  $("automation-retry").addEventListener("click", loadAutomation);
+  $("checkpoint-refresh").addEventListener("click", () => loadOverview(true));
+  $("analysis-form").addEventListener("submit", startAnalysis);
+  $("analysis-product").addEventListener("change", () => { $("analysis-consent").checked = false; updateWorkflowControls(); loadAnalysis(); });
+  $("analysis-method").addEventListener("change", () => { $("analysis-consent").checked = false; messageAt("analysis-form-error", ""); updateWorkflowControls(); });
+  $("analysis-consent").addEventListener("change", updateWorkflowControls);
+  $("analysis-retry").addEventListener("click", loadAnalysis);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) clearTimeout(state.pollTimer); else loadAutomation(); });
+  window.addEventListener("pagehide", () => { clearTimeout(state.pollTimer); state.automationController?.abort(); });
   $("export-button").title = "Download a spreadsheet-safe CSV"; $("export-button").addEventListener("click", exportCsv);
   $("theme-toggle").addEventListener("click", () => { const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; applyTheme(theme); savePreference("reviewdesk-theme", theme); });
   $("review-sort").options[0].textContent = "Recently added"; $("review-sort").options[1].textContent = "Added earliest";
@@ -520,4 +948,6 @@
   window.addEventListener("hashchange", () => navigate(location.hash.slice(1), true));
   navigate(location.hash.slice(1));
   loadOverview();
+  updateWorkflowControls();
+  loadAutomation();
 })();

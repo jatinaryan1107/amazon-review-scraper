@@ -195,6 +195,79 @@ class CollectorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_input_urls(source)
 
+    def test_cancel_before_load_creates_resumable_checkpoint_without_navigation(self):
+        browser = FakeBrowser([])
+        report = collect_product(browser, self.store, PRODUCT, cancelled=lambda: True)
+        self.assertTrue(report["cancelled"])
+        self.assertEqual(report["status"], "paused")
+        self.assertEqual(browser.loads, [])
+        self.assertEqual(self.store.get_checkpoint(ASIN)["next_url"], FIRST)
+
+    def test_cancel_after_commit_keeps_next_cursor_and_does_not_advance(self):
+        stopped = False
+        events = []
+
+        def progress(event):
+            nonlocal stopped
+            events.append(event)
+            if event["pages_processed"]:
+                self.assertEqual(self.store.summary()["total_reviews"], 1)
+                self.assertEqual(self.store.get_checkpoint(ASIN)["next_url"], SECOND)
+                stopped = True
+
+        browser = FakeBrowser([PageSnapshot(FIRST, html(), has_next=True, next_url=SECOND)])
+        report = collect_product(browser, self.store, PRODUCT, max_pages=3,
+                                 on_progress=progress, cancelled=lambda: stopped)
+        self.assertEqual((report["status"], report["inserted"], report["pages_processed"]), ("paused", 1, 1))
+        self.assertTrue(report["cancelled"])
+        self.assertEqual(browser.advances, 0)
+        self.assertEqual(events[-1]["status"], "paused")
+
+    def test_progress_observer_failure_does_not_undo_saved_page(self):
+        def failed_observer(event):
+            raise RuntimeError("Synthetic observer failure")
+
+        report = collect_product(FakeBrowser([PageSnapshot(FIRST, html())]), self.store,
+                                 PRODUCT, on_progress=failed_observer)
+        self.assertEqual(report["status"], "complete")
+        self.assertEqual(self.store.summary()["total_reviews"], 1)
+
+    def test_cancel_during_replay_retains_original_replay_position(self):
+        self.store.save_page(ASIN, [], next_url=FIRST, pages_completed=1,
+                             replay_steps=1, status="paused")
+        stopped = False
+
+        class CancelOnLoad(FakeBrowser):
+            def load(inner, url):
+                nonlocal stopped
+                snapshot = super().load(url)
+                stopped = True
+                return snapshot
+
+        browser = CancelOnLoad([PageSnapshot(FIRST, html(), has_next=True)])
+        report = collect_product(browser, self.store, PRODUCT, resume=True,
+                                 cancelled=lambda: stopped)
+        self.assertTrue(report["cancelled"])
+        self.assertEqual(browser.advances, 0)
+        self.assertEqual(self.store.get_checkpoint(ASIN)["replay_steps"], 1)
+
+    def test_http_access_block_records_blocked_checkpoint(self):
+        error = RuntimeError("Synthetic HTTP 429")
+        error.http_status = 429
+        report = collect_product(FakeBrowser([error]), self.store, PRODUCT)
+        self.assertEqual(report["status"], "blocked")
+        self.assertEqual(self.store.get_checkpoint(ASIN)["status"], "blocked")
+
+    def test_browser_diagnostics_do_not_leak_into_checkpoints_or_progress(self):
+        events = []
+        private = "Cookie: session-id=PRIVATE-SYNTHETIC-SECRET"
+        report = collect_product(FakeBrowser([RuntimeError(private)]), self.store,
+                                 PRODUCT, on_progress=events.append)
+        self.assertEqual(report["status"], "failed")
+        self.assertNotIn(private, report["detail"])
+        self.assertNotIn(private, self.store.get_checkpoint(ASIN)["detail"])
+        self.assertTrue(all(private not in event["detail"] for event in events))
+
     def test_live_entry_point_syntax_without_executing_it(self):
         source = Path(__file__).resolve().parents[1] / "scraper.py"
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
