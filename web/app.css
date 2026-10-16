@@ -2783,6 +2783,18 @@ textarea:focus-visible{
 .session-card>.button{
   flex-shrink:0
 }
+.session-actions{
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  justify-content:flex-end;
+  gap:8px;
+  flex-shrink:0;
+  max-width:320px
+}
+.session-actions .button{
+  white-space:nowrap
+}
 .auth-saved,.status-succeeded{
   color:var(--accent);
   background:var(--accent-soft)
@@ -3375,7 +3387,16 @@ textarea:focus-visible{
   }
   .session-card{
     gap:13px;
-    padding:20px
+    padding:20px;
+    flex-wrap:wrap
+  }
+  .session-copy{
+    min-width:150px
+  }
+  .session-actions{
+    margin-left:56px;
+    max-width:calc(100% - 56px);
+    justify-content:flex-start
   }
   .session-heading{
     gap:7px 10px
@@ -3402,6 +3423,16 @@ textarea:focus-visible{
   }
   .session-card>.button{
     margin-left:55px;
+    height:35px
+  }
+  .session-actions{
+    margin-left:55px;
+    justify-content:flex-start;
+    max-width:calc(100% - 55px)
+  }
+  .session-actions .button{
+    font-size:11px;
+    padding-inline:12px;
     height:35px
   }
   .session-heading h2,.analysis-control-intro h2,.section-title h2{
@@ -3519,6 +3550,10 @@ textarea:focus-visible{
   }
   .session-card>.button{
     margin-left:47px
+  }
+  .session-actions{
+    margin-left:47px;
+    max-width:calc(100% - 47px)
   }
   .form-row,.analysis-fields{
     grid-template-columns:minmax(0,1fr)

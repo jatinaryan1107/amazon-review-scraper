@@ -517,6 +517,9 @@
     const sessionReady = data?.auth?.status === "saved";
     $("auth-start").disabled = !data || state.mutation || busy || !browserReady;
     $("auth-start").lastElementChild.textContent = sessionReady ? "Refresh sign-in" : "Open sign-in";
+    const canSave = active?.kind === "auth" && active.status === "running" && active.phase === "awaiting_login";
+    $("auth-save").hidden = !canSave;
+    $("auth-save").disabled = !canSave || state.mutation;
     $("collection-submit").disabled = !data || state.mutation || busy || !browserReady || !sessionReady;
     $("collection-submit").lastElementChild.textContent = state.mutation ? "Please wait..." : "Start collection";
     const configured = Boolean(data?.capabilities?.openai_configured);
@@ -596,6 +599,14 @@
     $("auth-detail").textContent = auth.detail || (status === "saved" ? "A session is saved on this device. Collection checks whether Amazon still accepts it." : "Open sign-in to save an Amazon session on this device.");
     const jobs = Array.isArray(data.jobs) ? data.jobs : [];
     const active = data.active_job;
+    if (active?.kind === "auth") {
+      const ready = active.status === "running" && active.phase === "awaiting_login";
+      $("auth-status").textContent = ready ? "WAITING FOR YOU" : active.status === "cancelling" ? "STOPPING" : "OPENING SIGN-IN";
+      $("auth-detail").textContent = ready ? "1. Sign in in the Amazon window. 2. Return here and save your session." : active.status === "cancelling" ? active.detail || "Stopping sign-in. The previous session will be retained." : "Opening the Amazon sign-in window. Wait until it appears before signing in.";
+    } else if (status !== "saved") {
+      const latestAuth = jobs.find((job) => job.kind === "auth");
+      if (latestAuth && ["failed", "paused", "blocked", "cancelled", "interrupted"].includes(latestAuth.status) && latestAuth.detail) $("auth-detail").textContent = latestAuth.detail;
+    }
     const displayed = active ? [active, ...jobs.filter((job) => job.id !== active.id)].slice(0, 8) : jobs.slice(0, 8);
     const key = JSON.stringify([displayed, state.mutation]);
     if (state.jobRenderKey !== key) {
@@ -927,6 +938,10 @@
   $("auth-start").addEventListener("click", async () => {
     const job = await createJob({ kind: "auth" }, "auth-form-error");
     if (job) navigate("collection", true);
+  });
+  $("auth-save").addEventListener("click", () => {
+    const active = state.automation?.active_job;
+    if (!state.mutation && active?.kind === "auth" && active.status === "running" && active.phase === "awaiting_login") mutateJob(active, "finish");
   });
   $("automation-retry").addEventListener("click", loadAutomation);
   $("checkpoint-refresh").addEventListener("click", () => loadOverview(true));
