@@ -3768,6 +3768,17 @@ textarea:focus-visible{
   margin-top:17px;
   border-top:1px solid var(--line)
 }
+.provider-quota{
+  padding:14px;
+  margin-top:12px;
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:var(--surface-soft)
+}
+.provider-quota>strong{font-size:12px}
+.provider-quota-counts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}
+.provider-quota-counts dt{font-size:10px;color:var(--muted)}
+.provider-quota-counts dd{margin:4px 0 0;font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
 .provider-dialog .form-message:not(.error){
   background:var(--accent-soft);
   color:var(--accent)

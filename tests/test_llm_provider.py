@@ -125,6 +125,78 @@ class ProviderTests(unittest.TestCase):
         self.assertNotIn(KEY, str(caught.exception))
         self.assertEqual(build.return_value.open.call_count, 1)
 
+    def test_rate_limit_headers_are_preserved_without_error_body_or_credentials(self):
+        failure = error.HTTPError("https://openrouter.ai/api/v1/chat/completions", 429, KEY,
+            {"Retry-After": "9", "X-RateLimit-Limit": "50", "X-RateLimit-Remaining": "0",
+             "X-RateLimit-Reset": "1800014400000", "Authorization": KEY},
+            io.BytesIO(json.dumps({"error": {"message": KEY, "metadata": {"raw_error": KEY}}}).encode()))
+        with patch("llm_provider.request.build_opener") as build:
+            build.return_value.open.side_effect = failure
+            with self.assertRaises(ProviderError) as caught:
+                self.registry().chat([{"role": "user", "content": "Synthetic"}])
+        self.assertEqual(caught.exception.diagnostics, {"http_status": 429, "error_status": 429,
+            "rate_limit_source": "openrouter", "limit": 50, "remaining": 0, "reset_at": 1800014400})
+        self.assertNotIn(KEY, json.dumps(caught.exception.diagnostics) + str(caught.exception))
+
+    def test_provider_error_inside_http_200_keeps_the_two_statuses_distinct(self):
+        payload = {"error": {"code": 429, "message": KEY, "metadata": {"provider_code": 429, "raw_error": KEY}}}
+        with patch("llm_provider.request.build_opener") as build:
+            build.return_value.open.return_value = io.BytesIO(json.dumps(payload).encode())
+            with self.assertRaises(ProviderError) as caught:
+                self.registry().chat([{"role": "user", "content": "Synthetic"}])
+        self.assertEqual(caught.exception.diagnostics, {"http_status": 200, "error_status": 429,
+            "rate_limit_source": "provider", "provider_code": 429})
+        self.assertNotIn(KEY, json.dumps(caught.exception.diagnostics))
+
+    def test_account_check_uses_fixed_get_and_exposes_only_request_counters(self):
+        raw = {"data": {"label": KEY, "hash": KEY, "limit_remaining": 123,
+            "free_model_daily_requests": {"used": 5, "limit": 50, "remaining": 45}}}
+        registry = self.registry(lambda payload: self.fail("Quota checks must not call the model transport"))
+        with patch("llm_provider.request.build_opener") as build, patch("llm_provider.time.time", return_value=1800000000):
+            build.return_value.open.return_value = io.BytesIO(json.dumps(raw).encode())
+            result = registry.check_quota()
+        outgoing = build.return_value.open.call_args.args[0]
+        self.assertEqual(outgoing.full_url, "https://openrouter.ai/api/v1/key")
+        self.assertEqual(outgoing.get_method(), "GET")
+        self.assertIsNone(outgoing.data)
+        self.assertEqual(result["quota"], {"available": True, "used": 5, "limit": 50, "remaining": 45})
+        self.assertEqual(result["model_calls"], 0)
+        self.assertEqual(result["resets_at"] % 86400, 0)
+        self.assertNotIn(KEY, json.dumps(result))
+        self.assertNotIn("limit_remaining", json.dumps(result))
+
+    def test_missing_account_counter_is_unknown_and_invalid_values_are_rejected(self):
+        registry = ProviderRegistry(environ={})
+        with self.assertRaises(ProviderError):
+            registry.check_quota()
+        registry.configure({"api_key": KEY})
+        registry._quota_transport = lambda: {"data": {"label": KEY}}
+        result = registry.check_quota()
+        self.assertEqual(result["quota"], {"available": False, "used": None, "limit": None, "remaining": None})
+        for counter in [{"used": True, "limit": 50, "remaining": 45},
+                        {"used": 5, "limit": 50, "remaining": -1},
+                        {"used": 5, "limit": 50, "remaining": 51}, {"used": 5}]:
+            registry._quota_transport = lambda: {"data": {"free_model_daily_requests": counter}}
+            with self.subTest(counter=counter), self.assertRaises(ProviderError):
+                registry.check_quota()
+
+    def test_changed_key_and_private_account_transport_errors_are_not_exposed(self):
+        registry = self.registry()
+        def changed():
+            registry.configure({"clear": True})
+            return {"data": {"label": KEY}}
+        registry._quota_transport = changed
+        with self.assertRaises(ProviderError) as caught:
+            registry.check_quota()
+        self.assertEqual(caught.exception.code, "configuration")
+        registry.configure({"api_key": KEY})
+        def failed():
+            raise RuntimeError(KEY)
+        registry._quota_transport = failed
+        with self.assertRaises(ProviderError) as caught:
+            registry.check_quota()
+        self.assertNotIn(KEY, str(caught.exception))
+
     def test_malformed_or_truncated_outputs_are_not_accepted(self):
         for response in [completion(choices=[]), completion(choices=[{"finish_reason": "length", "message": {"content": "{"}}]),
                          completion(model="<script>bad</script>"), completion(usage={"cost": "NaN"}),

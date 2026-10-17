@@ -386,7 +386,8 @@ class LLMEngine:
                 except ProviderError as exc:
                     if not completed:
                         raise
-                    pause = {"code": exc.code, "message": str(exc), "retry_after": exc.retry_after}
+                    pause = {"code": exc.code, "message": str(exc), "retry_after": exc.retry_after,
+                             "diagnostics": exc.diagnostics}
                     break
                 except (ValueError, RecursionError):
                     if not completed:

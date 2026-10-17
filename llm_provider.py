@@ -16,6 +16,7 @@ from review_analysis import AnalysisCancelled, AnalysisError
 
 
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+QUOTA_ENDPOINT = "https://openrouter.ai/api/v1/key"
 MODEL = "openrouter/free"
 MAX_BYTES = 1024 * 1024
 RESPONSE_BUDGET_SECONDS = 120
@@ -24,10 +25,71 @@ RESPONSE_BUDGET_SECONDS = 120
 class ProviderError(AnalysisError):
     """Only a public reason and bounded retry hint may leave the transport."""
 
-    def __init__(self, message, *, code="provider_error", retry_after=None):
+    def __init__(self, message, *, code="provider_error", retry_after=None, diagnostics=None):
         super().__init__(message)
         self.code = code
         self.retry_after = retry_after
+        self.diagnostics = public_diagnostics(diagnostics)
+
+
+def public_diagnostics(value):
+    """Only small typed fields can leave provider error handling."""
+    if not isinstance(value, Mapping):
+        return {}
+    safe = {}
+    source = value.get("rate_limit_source")
+    if isinstance(source, str) and source in {"openrouter", "provider", "unknown"}:
+        safe["rate_limit_source"] = source
+    for field, low, high in [("http_status", 100, 599), ("error_status", 100, 599),
+                             ("provider_code", 100, 599), ("limit", 0, 10_000_000),
+                             ("remaining", 0, 10_000_000), ("reset_at", 1, 4_102_444_800)]:
+        number = value.get(field)
+        if type(number) is int and low <= number <= high:
+            safe[field] = number
+    return safe
+
+
+def _error_diagnostics(status, failure=None, headers=None, http_status=None):
+    safe = {"error_status": status, "http_status": http_status}
+    if status != 429:
+        return public_diagnostics(safe)
+    safe["rate_limit_source"] = "unknown"
+    metadata = failure.get("metadata") if isinstance(failure, Mapping) else None
+    provider_code = metadata.get("provider_code") if isinstance(metadata, Mapping) else None
+    if (type(provider_code) is int or isinstance(provider_code, str)) and provider_code != "":
+        safe["rate_limit_source"] = "provider"
+    if type(provider_code) is int and 100 <= provider_code <= 599:
+        safe.update(provider_code=provider_code, rate_limit_source="provider")
+    headers = headers or {}
+    for header, field in [("X-RateLimit-Limit", "limit"), ("X-RateLimit-Remaining", "remaining"),
+                          ("X-RateLimit-Reset", "reset_at")]:
+        raw = headers.get(header)
+        if not isinstance(raw, str) or not re.fullmatch(r"[0-9]{1,13}", raw):
+            continue
+        number = int(raw)
+        if field == "reset_at" and number > 4_102_444_800:
+            number //= 1000
+        safe[field] = number
+    safe = public_diagnostics(safe)
+    if safe.get("rate_limit_source") == "unknown" and any(field in safe for field in ("limit", "remaining", "reset_at")):
+        safe["rate_limit_source"] = "openrouter"
+    return safe
+
+
+def _raise_provider_error(status, *, failure=None, headers=None, http_status=None):
+    code = {400: "invalid_request", 401: "authorization", 402: "budget", 403: "authorization",
+            404: "unavailable", 429: "rate_limit", 500: "unavailable", 502: "unavailable",
+            503: "unavailable"}.get(status, "invalid_response") if type(status) is int else "invalid_response"
+    retry_after = None
+    try:
+        raw = (headers or {}).get("Retry-After", "")
+        number = float(raw)
+        if math.isfinite(number) and 0 <= number <= 86400:
+            retry_after = number
+    except (ValueError, TypeError):
+        pass
+    raise ProviderError("The provider did not complete this request.", code=code, retry_after=retry_after,
+                        diagnostics=_error_diagnostics(status, failure, headers, http_status))
 
 
 def _cancel(cancelled):
@@ -73,9 +135,11 @@ def chat_payload(messages, *, schema=None, tools=None, require_tool=False, max_t
 
 
 class ProviderRegistry:
-    def __init__(self, environ=None, transport=None):
+    def __init__(self, environ=None, transport=None, quota_transport=None):
         self._environment = os.environ if environ is None else environ
         self._transport = transport
+        self._quota_transport = quota_transport
+        self._quota_lock = threading.Lock()
         self._session_key = ""
         self._require_zdr = False
         self._disabled = False
@@ -149,26 +213,34 @@ class ProviderRegistry:
                     body.extend(part)
                     if len(body) > MAX_BYTES:
                         raise ProviderError("The provider response was too large.", code="invalid_response")
-            return _loads(body.decode("utf-8"))
+                headers, status = getattr(response, "headers", {}), getattr(response, "status", 200)
+            result = _loads(body.decode("utf-8"))
+            if isinstance(result, Mapping) and result.get("error"):
+                failure = result["error"]
+                code = failure.get("code") if isinstance(failure, Mapping) else None
+                _raise_provider_error(code, failure=failure, headers=headers, http_status=status)
+            return result
         except error.HTTPError as exc:
             status = exc.code
-            retry_after = None
+            headers = exc.headers
+            failure = None
             try:
-                value = float(exc.headers.get("Retry-After", ""))
-                if math.isfinite(value) and 0 <= value <= 86400:
-                    retry_after = value
-            except (TypeError, ValueError):
+                if exc.fp is not None:
+                    body = bytearray()
+                    started = time.monotonic()
+                    while len(body) <= 16_384 and time.monotonic() - started < 5:
+                        part = exc.read1(16_385 - len(body))
+                        if not part:
+                            break
+                        body.extend(part)
+                    raw = bytes(body)
+                    if len(raw) <= 16_384:
+                        parsed = _loads(raw.decode("utf-8"))
+                        failure = parsed.get("error") if isinstance(parsed, Mapping) else None
+            except (OSError, ValueError, UnicodeError, RecursionError):
                 pass
             exc.close()
-            if status in {401, 403}:
-                raise ProviderError("OpenRouter could not authorize this request. Check the server key and account settings.", code="authorization") from None
-            if status == 429:
-                raise ProviderError("OpenRouter reached a free request limit. Completed chunks are saved; resume later.", code="rate_limit", retry_after=retry_after) from None
-            if status == 404:
-                raise ProviderError("No free endpoint currently meets the required features and privacy settings.", code="unavailable") from None
-            if status == 402:
-                raise ProviderError("OpenRouter declined the account or key budget. No paid fallback was attempted.", code="budget") from None
-            raise ProviderError("OpenRouter could not complete this request. No paid fallback was attempted.", code="unavailable") from None
+            _raise_provider_error(status, failure=failure, headers=headers, http_status=status)
         except (ProviderError, AnalysisCancelled):
             raise
         except TimeoutError:
@@ -180,6 +252,68 @@ class ProviderRegistry:
             raise ProviderError("The provider request could not finish. Its attempt remains counted for safety.", code="connection") from None
         except (ValueError, UnicodeError, RecursionError):
             raise ProviderError("The provider response was not valid JSON.", code="invalid_response") from None
+
+    def check_quota(self):
+        """Read account counters without review text or a generation request."""
+        key, _ = self._key()
+        if not key:
+            raise ProviderError("Connect an OpenRouter key before checking its quota.", code="not_configured")
+        if not self._quota_lock.acquire(blocking=False):
+            raise ProviderError("A quota check is already running.", code="check_busy")
+        try:
+            if self._quota_transport is not None:
+                result = self._quota_transport()
+            else:
+                outgoing = request.Request(QUOTA_ENDPOINT, method="GET", headers={
+                    "Authorization": "Bearer " + key, "Accept": "application/json", "Cache-Control": "no-store"})
+                started = time.monotonic()
+                with request.build_opener(_NoRedirect()).open(outgoing, timeout=8) as response:
+                    body = bytearray()
+                    while True:
+                        if time.monotonic() - started >= 10:
+                            raise ProviderError("The account check timed out.", code="timeout")
+                        part = response.read1(min(16_384, 65_537 - len(body)))
+                        if not part:
+                            break
+                        body.extend(part)
+                        if len(body) > 65_536:
+                            raise ProviderError("The account response was too large.", code="invalid_response")
+                result = _loads(body.decode("utf-8"))
+            if isinstance(result, Mapping) and result.get("error"):
+                failure = result["error"]
+                status = failure.get("code") if isinstance(failure, Mapping) else None
+                _raise_provider_error(status, failure=failure)
+            if self._key()[0] != key:
+                raise ProviderError("The configured key changed during the quota check.", code="configuration")
+            if not isinstance(result, Mapping) or not isinstance(result.get("data"), Mapping):
+                raise ProviderError("The account response was invalid.", code="invalid_response")
+            counter = result["data"].get("free_model_daily_requests")
+            quota = {"available": False, "used": None, "limit": None, "remaining": None}
+            if counter is not None:
+                if (not isinstance(counter, Mapping) or any(type(counter.get(field)) is not int
+                        or not 0 <= counter[field] <= 10_000_000 for field in ("used", "limit", "remaining"))
+                        or counter["remaining"] > counter["limit"]):
+                    raise ProviderError("The account counter was invalid.", code="invalid_response")
+                quota.update(available=True, **{field: counter[field] for field in ("used", "limit", "remaining")})
+            checked = int(time.time())
+            return {"quota": quota, "checked_at": checked, "resets_at": (checked // 86400 + 1) * 86400,
+                    "model_calls": 0}
+        except error.HTTPError as exc:
+            status, headers = exc.code, exc.headers
+            exc.close()
+            _raise_provider_error(status, headers=headers, http_status=status)
+        except (ProviderError, AnalysisCancelled):
+            raise
+        except TimeoutError:
+            raise ProviderError("The account check timed out.", code="timeout") from None
+        except OSError:
+            raise ProviderError("The account check could not finish.", code="connection") from None
+        except (ValueError, UnicodeError, RecursionError):
+            raise ProviderError("The account response was invalid.", code="invalid_response") from None
+        except Exception:
+            raise ProviderError("The account response could not be validated.", code="invalid_response") from None
+        finally:
+            self._quota_lock.release()
 
     def _usage(self, usage):
         if not isinstance(usage, Mapping):
@@ -229,9 +363,7 @@ class ProviderRegistry:
             if result.get("error"):
                 failure = result["error"]
                 status = failure.get("code") if isinstance(failure, Mapping) else None
-                code = {400: "invalid_request", 401: "authorization", 402: "budget", 403: "authorization",
-                        404: "unavailable", 429: "rate_limit", 502: "unavailable", 503: "unavailable"}.get(status, "invalid_response") if type(status) is int else "invalid_response"
-                raise ProviderError("The provider returned an error instead of an answer.", code=code)
+                _raise_provider_error(status, failure=failure)
             choices = result.get("choices")
             if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], Mapping):
                 raise ProviderError("The provider returned an invalid answer.", code="invalid_response")

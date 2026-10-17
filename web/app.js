@@ -19,6 +19,7 @@
     pollTimer: null, mutation: false, jobStatuses: new Map(), jobRenderKey: "", analysisJobKey: "",
     analysis: null, analysisVersion: 0, analysisController: null, analysisLoading: false,
     provider: null, providerVersion: 0, providerSaving: false, providerPolicyDirty: false,
+    providerChecking: false,
     plan: null, planVersion: 0, planController: null, planLoading: false, planError: null,
     researchRenderKey: "", researchJobKey: "",
   };
@@ -119,6 +120,8 @@
       try {
         const data = await response.json();
         if (data.error) message = data.error;
+        const details = describeProviderDiagnostics(data.diagnostics);
+        if (details) message += ` ${details}`;
         if (data.retry_after != null && Number.isFinite(Number(data.retry_after))) message += ` Wait at least ${number(Math.ceil(Number(data.retry_after)))} seconds before trying again. Retries are manual.`;
       } catch { /* Keep the readable fallback. */ }
       throw new Error(message);
@@ -572,10 +575,12 @@
     $("research-provider-note").hidden = routerReady;
     $("research-provider-note").firstElementChild.textContent = router.disabled ? "AI research is disabled after a cost signal. Check AI settings. Local statistics questions still work." : "Local questions work now. Add an OpenRouter key for model research.";
     const providerBusy = busy && (active.kind === "research" || active.options?.analysis_method === "openrouter");
-    $("provider-save").disabled = state.providerSaving || providerBusy;
-    $("provider-key").disabled = state.providerSaving || providerBusy || state.provider?.key_source === "environment";
-    $("provider-zdr").disabled = state.providerSaving || providerBusy;
-    $("provider-clear").disabled = state.providerSaving || providerBusy || state.provider?.key_source !== "session";
+    $("provider-save").disabled = state.providerSaving || state.providerChecking || providerBusy;
+    $("provider-key").disabled = state.providerSaving || state.providerChecking || providerBusy || state.provider?.key_source === "environment";
+    $("provider-zdr").disabled = state.providerSaving || state.providerChecking || providerBusy;
+    $("provider-clear").disabled = state.providerSaving || state.providerChecking || providerBusy || state.provider?.key_source !== "session";
+    $("provider-check").disabled = state.providerSaving || state.providerChecking || providerBusy || !["session", "environment"].includes(state.provider?.key_source);
+    $("provider-check").textContent = state.providerChecking ? "Checking account..." : "Check OpenRouter quota";
   }
   function routerStatus() {
     const capabilities = state.automation?.capabilities;
@@ -626,6 +631,8 @@
     if (job.detail) card.append(node("p", "job-detail", job.detail));
     if (job.error && job.error !== job.detail) card.append(node("p", "job-error", job.error));
     if (job.result?.retry_after != null && Number.isFinite(Number(job.result.retry_after))) card.append(node("p", "job-detail", `Provider retry guidance: wait at least ${number(Math.ceil(Number(job.result.retry_after)))} seconds before trying again. No automatic retry or paid fallback will run.`));
+    const diagnostics = describeProviderDiagnostics(job.result?.diagnostics || (job.result?.error_code === "rate_limit" ? {rate_limit_source: "unknown"} : null));
+    if (diagnostics) card.append(node("p", "job-detail", diagnostics));
     const actions = node("div", "job-actions");
     if (isActive && job.kind === "auth" && job.status === "running" && job.phase === "awaiting_login") {
       const note = node("p", "field-help", "Complete sign-in in the opened browser, then save the session here."); card.append(note);
@@ -766,6 +773,40 @@
     messageAt("provider-result", message);
     $("provider-result").classList.toggle("error", error);
   }
+  function describeProviderDiagnostics(details) {
+    if (!details || typeof details !== "object") return "";
+    const parts = [];
+    if (details.rate_limit_source === "provider") parts.push("The response identifies the model provider as the source.");
+    else if (details.rate_limit_source === "openrouter") parts.push("OpenRouter supplied platform rate-limit headers.");
+    else if (details.rate_limit_source === "unknown") parts.push("The response did not identify the rate-limit source.");
+    if (Number.isInteger(details.http_status)) parts.push(`HTTP status: ${details.http_status}.`);
+    if (Number.isInteger(details.error_status) && details.error_status !== details.http_status) parts.push(`Error inside the response: ${details.error_status}.`);
+    if (Number.isInteger(details.limit)) parts.push(`Reported limit: ${number(details.limit)}.`);
+    if (Number.isInteger(details.remaining)) parts.push(`Reported remaining: ${number(details.remaining)}.`);
+    if (Number.isInteger(details.reset_at)) parts.push(`Reported reset: ${new Date(details.reset_at * 1000).toLocaleString()}.`);
+    return parts.join(" ");
+  }
+  async function checkProviderQuota() {
+    if (state.providerChecking || state.providerSaving || !["session", "environment"].includes(state.provider?.key_source)) return;
+    state.providerChecking = true; updateWorkflowControls();
+    const output = $("provider-quota"); output.hidden = false;
+    output.replaceChildren(node("p", "field-help", "Reading OpenRouter account counters. No review text is sent."));
+    try {
+      const result = await postJson("/api/provider/check", {}), quota = result.quota || {};
+      output.replaceChildren(node("strong", "", "OpenRouter account allowance"));
+      if (quota.available) {
+        const counts = node("dl", "provider-quota-counts");
+        for (const [label, value] of [["Used", quota.used], ["Daily limit", quota.limit], ["Remaining", quota.remaining]]) {
+          const item = node("div"); item.append(node("dt", "", label), node("dd", "", number(value))); counts.append(item);
+        }
+        output.append(counts, node("p", "field-help", `Daily reset: ${new Date(result.resets_at * 1000).toLocaleString()}.`));
+      } else output.append(node("p", "field-help", "Connection verified. OpenRouter did not supply its free-request counter. This does not mean the allowance is zero."));
+      if (Number.isInteger(result.app_daily_remaining)) output.append(node("p", "field-help", `Reviewdesk separately has ${number(result.app_daily_remaining)} of ${number(result.app_daily_limit)} local attempts left. Failed and uncertain attempts count here.`));
+      output.append(node("p", "field-help", "Daily allowance does not measure per-minute limits or the model provider's available capacity."),
+                    node("p", "field-help", `Checked ${new Date(result.checked_at * 1000).toLocaleString()}. No AI response was generated.`));
+    } catch (error) { output.replaceChildren(node("p", "form-message error", error.message)); }
+    finally { state.providerChecking = false; updateWorkflowControls(); }
+  }
   function renderProvider() {
     const provider = state.provider;
     if (!provider) return;
@@ -798,7 +839,7 @@
   }
   async function saveProvider(event, clear = false) {
     event?.preventDefault();
-    if (state.providerSaving) return;
+    if (state.providerSaving || state.providerChecking) return;
     const key = $("provider-key").value.trim();
     if (!clear && !key && !state.provider?.configured) { providerMessage("Paste an OpenRouter key to connect free model analysis.", true); return; }
     state.providerSaving = true; updateWorkflowControls(); providerMessage("Updating local server settings...");
@@ -808,6 +849,7 @@
     $("provider-key").value = "";
     try {
       await postJson("/api/provider", payload);
+      $("provider-quota").hidden = true; $("provider-quota").replaceChildren();
       state.providerPolicyDirty = false;
       await loadProvider();
       $("analysis-consent").checked = false; $("research-consent").checked = false;
@@ -1076,6 +1118,8 @@
     if (report.pause_reason?.message) {
       const pause = node("div", "report-stale"), copy = node("div"); copy.append(node("p", "", report.pause_reason.message));
       if (report.pause_reason.retry_after != null && Number.isFinite(Number(report.pause_reason.retry_after))) copy.append(node("p", "", `Provider guidance: wait at least ${number(Math.ceil(Number(report.pause_reason.retry_after)))} seconds before another run. Retries are manual, with no paid fallback.`));
+      const diagnostics = describeProviderDiagnostics(report.pause_reason.diagnostics);
+      if (diagnostics) copy.append(node("p", "", diagnostics));
       pause.append(icon("clock"), copy); container.append(pause);
     }
     const intro = node("section", "panel report-intro"), topline = node("div", "report-topline");
@@ -1236,6 +1280,7 @@
   $("analysis-retry").addEventListener("click", loadAnalysis);
   $("provider-form").addEventListener("submit", saveProvider);
   $("provider-clear").addEventListener("click", (event) => saveProvider(event, true));
+  $("provider-check").addEventListener("click", checkProviderQuota);
   $("provider-zdr").addEventListener("change", () => { state.providerPolicyDirty = true; });
   $("research-form").addEventListener("submit", startResearch);
   $("research-product").addEventListener("change", () => { $("research-consent").checked = false; messageAt("research-form-error", ""); updateWorkflowControls(); renderResearch(); });

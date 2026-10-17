@@ -415,6 +415,48 @@ class DashboardTests(unittest.TestCase):
             status, _, content = self.request("/api/analysis/plan?" + query)
             self.assertEqual(status, 400, (query, content))
 
+    def test_account_quota_check_is_explicit_read_only_and_makes_no_model_call(self):
+        registry = self.server.automation._provider_registry
+        checked = []
+        registry._quota_transport = lambda: checked.append(True) or {"data": {"label": "PRIVATE-LABEL",
+            "free_model_daily_requests": {"used": 5, "limit": 50, "remaining": 45}}}
+        self.assertEqual(self.post_json("/api/provider", {"api_key": "SYNTHETIC-SECRET"})[0], 200)
+        before = {p.name: p.read_bytes() for p in self.data.data_dir.glob("*.sqlite3")}
+        status, _, content = self.post_json("/api/provider/check", {})
+        self.assertEqual(status, 200, content)
+        data = json.loads(content)
+        self.assertEqual(data["quota"]["remaining"], 45)
+        self.assertEqual(data["app_daily_remaining"], 50)
+        self.assertEqual(data["model_calls"], 0)
+        self.assertEqual(checked, [True])
+        self.assertNotIn("PRIVATE-LABEL", content.decode())
+        self.assertNotIn("SYNTHETIC-SECRET", content.decode())
+        self.assertEqual({p.name: p.read_bytes() for p in self.data.data_dir.glob("*.sqlite3")}, before)
+
+    def test_account_quota_check_rejects_cross_origin_and_unknown_options_before_network(self):
+        registry = self.server.automation._provider_registry
+        registry._quota_transport = Mock(side_effect=AssertionError("Invalid requests must not reach OpenRouter"))
+        self.post_json("/api/provider", {"api_key": "SYNTHETIC-SECRET"})
+        headers = {"Content-Type": "application/json", "X-Reviewdesk-Request": "1", "Origin": "https://example.invalid"}
+        self.assertEqual(self.request("/api/provider/check", method="POST", body=b"{}", headers=headers)[0], 403)
+        self.assertEqual(self.request("/api/provider/check", method="POST", body=b"{}", headers={"Content-Type":"application/json"})[0], 403)
+        for payload in [{"url": "https://example.invalid"}, {"api_key": "SYNTHETIC-SECRET"}, []]:
+            self.assertEqual(self.post_json("/api/provider/check", payload)[0], 400)
+        self.assertEqual(self.post_json("/api/provider/check?extra=yes", {})[0], 400)
+        registry._quota_transport.assert_not_called()
+
+    def test_rate_diagnostics_do_not_expose_raw_provider_fields(self):
+        failure = ProviderError("RAW-SECRET", code="rate_limit")
+        failure.diagnostics = {"rate_limit_source": "provider", "provider_code": 429, "raw_error": "RAW-SECRET",
+                               "remaining": True, "reset_at": float("inf"), "message": "RAW-SECRET"}
+        with patch.object(self.server.automation, "check_provider_quota", side_effect=failure):
+            status, _, content = self.post_json("/api/provider/check", {})
+        self.assertEqual(status, 429)
+        data = json.loads(content)
+        self.assertEqual(data["diagnostics"], {"rate_limit_source": "provider", "provider_code": 429})
+        self.assertIn("model provider", data["error"])
+        self.assertNotIn("RAW-SECRET", content.decode())
+
     def test_exact_research_http_job_runs_without_a_key_and_makes_zero_provider_calls(self):
         status, _, content = self.post_json("/api/jobs", {"kind": "research", "dataset": "demo", "question": "How many reviews are stored?"})
         self.assertEqual(status, 202, content)

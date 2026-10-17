@@ -128,6 +128,10 @@ Broader coverage packs batches by the complete encoded request size, including m
 
 Reviewdesk requests providers that do not collect prompts for training and offers an additional zero data retention requirement. These controls can leave no compatible free route. The app does not silently relax them. They are routing requirements, not a promise about every aspect of provider data handling. Remote response caching and automatic context compression are disabled. See [OpenRouter provider controls](https://openrouter.ai/docs/guides/routing/provider-selection).
 
+In AI settings, **Check OpenRouter quota** reads the account's reported free-request usage, daily limit and remaining allowance. It sends no reviews and makes no model request. Reviewdesk's local attempt counter is shown separately because failed and uncertain attempts count locally. Missing account counters are displayed as unknown, not zero. Account quota checks are explicit actions and are not polled automatically.
+
+A 429 does not establish that the daily allowance is exhausted. Provider failures retain only typed status codes, any supplied rate-limit headers, a reported reset time and an identified platform or provider source. Unknown sources remain unknown. Errors inside HTTP 200 responses are kept distinct from the HTTP status. Raw error bodies, account labels, unrelated budget fields and credentials are not exposed. See [OpenRouter limits](https://openrouter.ai/docs/api_reference/limits).
+
 ## Ask questions about your reviews
 
 Choose a dataset and optional product under **Ask reviews**. Recognized count and rating questions use local calculations with zero model calls. Other questions require a configured OpenRouter key and permission to send the selected evidence.

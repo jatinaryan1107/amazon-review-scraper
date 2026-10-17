@@ -180,6 +180,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         code = diagnostics["error_code"]
         status = 429 if code in {"rate_limit", "daily_limit"} else 503 if code in {"unavailable", "connection"} else 400
         self.json_response(status, {"error": message, "code": code,
+                                   **({"diagnostics": diagnostics["diagnostics"]} if "diagnostics" in diagnostics else {}),
                                    **({"retry_after": diagnostics["retry_after"]} if "retry_after" in diagnostics else {})})
 
     @staticmethod
@@ -191,6 +192,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         try:
             parsed = urlsplit(self.path)
+            if not parsed.scheme and not parsed.netloc and parsed.path == "/api/provider/check":
+                if parsed.query:
+                    raise ValueError("Quota checks do not accept query filters.")
+                accepted, payload = self.read_action_json()
+                if accepted:
+                    if payload != {}:
+                        raise ValueError("Quota checks do not accept options.")
+                    self.json_response(200, self.server.automation.check_provider_quota())
+                return
             if not parsed.scheme and not parsed.netloc and parsed.path == "/api/provider":
                 if parsed.query:
                     raise ValueError("Provider settings do not accept query filters.")

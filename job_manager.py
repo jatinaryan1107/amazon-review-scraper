@@ -15,7 +15,7 @@ import uuid
 
 from dashboard_data import DashboardData, REVIEW_COLUMNS
 from review_parser import extract_asin
-from llm_provider import ProviderError
+from llm_provider import ProviderError, public_diagnostics
 
 
 ACTIVE = ("queued", "running", "cancelling")
@@ -27,7 +27,8 @@ PROVIDER_MESSAGES = {
     "not_configured": "Add an OpenRouter key in Settings before using AI.",
     "invalid_request": "The AI request could not be accepted. Check the selected scope and settings.",
     "authorization": "OpenRouter could not authorize this request. Check the configured key.",
-    "rate_limit": "The free provider rate limit was reached. Try again later.",
+    "rate_limit": "A rate limit blocked this request. The response did not identify which limit.",
+    "check_busy": "An account quota check is already running. Wait for its result.",
     "unavailable": "A free model is unavailable with the current privacy settings. Try again later.",
     "budget": "The analysis call budget was reached. Completed chunks are saved.",
     "connection": "The provider request could not be completed. Inspect the job before trying again.",
@@ -55,7 +56,15 @@ def provider_failure(error):
     if (not isinstance(retry, bool) and isinstance(retry, (int, float))
             and math.isfinite(retry) and 0 <= retry <= 86400):
         result["retry_after"] = math.ceil(retry)
-    return PROVIDER_MESSAGES.get(code, "AI analysis could not finish. Completed chunks are retained."), result
+    details = public_diagnostics(getattr(error, "diagnostics", None))
+    if details:
+        result["diagnostics"] = details
+    message = PROVIDER_MESSAGES.get(code, "AI analysis could not finish. Completed chunks are retained.")
+    if code == "rate_limit" and details.get("rate_limit_source") == "provider":
+        message = "The model provider is limiting requests. Your daily OpenRouter allowance may still be available."
+    elif code == "rate_limit" and details.get("rate_limit_source") == "openrouter":
+        message = "OpenRouter blocked this request under a platform rate limit. Check the account counter and reset details."
+    return message, result
 
 
 def now() -> str:
@@ -265,6 +274,11 @@ class AutomationService:
                 raise
             except Exception:
                 raise ValueError("Provider settings could not be updated. Check the settings and try again.") from None
+
+    def check_provider_quota(self):
+        result = self._registry().check_quota()
+        return {**result, "app_daily_limit": 50,
+                "app_daily_remaining": self._analysis_store.daily_remaining() if self._analysis_store else None}
 
     def _engine(self):
         with self._provider_mutex:
@@ -523,9 +537,10 @@ class AutomationService:
             return None, False
         if method == "openrouter" and isinstance(report.get("pause_reason"), dict):
             pause = report["pause_reason"]
-            message, diagnostics = provider_failure(ProviderError("Analysis paused.", code=pause.get("code"), retry_after=pause.get("retry_after")))
+            message, diagnostics = provider_failure(ProviderError("Analysis paused.", code=pause.get("code"), retry_after=pause.get("retry_after"), diagnostics=pause.get("diagnostics")))
             report["pause_reason"] = {"code": diagnostics["error_code"], "message": message,
-                                      "retry_after": diagnostics.get("retry_after")}
+                                      "retry_after": diagnostics.get("retry_after"),
+                                      **({"diagnostics": diagnostics["diagnostics"]} if "diagnostics" in diagnostics else {})}
         report_id = uuid.uuid4().hex
         with self._connection() as connection:
             connection.execute("INSERT INTO reports VALUES (?,?,?,?,?,?,?,?)", (
