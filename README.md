@@ -118,6 +118,8 @@ OpenRouter currently documents 20 requests per minute and 50 per day for free mo
 
 Validated analysis chunks and request accounting are stored in `data/analysis.sqlite3`. Keys are never stored there, in job options, in browser storage, or in reports. A cancelled or rate-limited run retains completed chunks; starting the same analysis again can reuse them. A large dataset may need several runs or days. Coverage counts, skipped text, cached chunks, and call usage determine what the report actually examined.
 
+Provider responses are read incrementally. A two-minute response budget prevents a stream of keepalive bytes from keeping a job waiting indefinitely. Cancellation and the deadline are checked between reads; a blocked network operation can take up to its forty-second socket timeout before control returns. Provider requests are not retried automatically.
+
 Reviewdesk requests providers that do not collect prompts for training and offers an additional zero data retention requirement. These controls can leave no compatible free route. The app does not silently relax them. They are routing requirements, not a promise about every aspect of provider data handling. Remote response caching and automatic context compression are disabled. See [OpenRouter provider controls](https://openrouter.ai/docs/guides/routing/provider-selection).
 
 ## Ask questions about your reviews

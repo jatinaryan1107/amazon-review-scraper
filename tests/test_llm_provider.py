@@ -1,11 +1,13 @@
 """Provider tests use synthetic credentials and fake transports only."""
 
 import json
+import io
 import unittest
 from unittest.mock import patch
 from urllib import error
 
 from llm_provider import MODEL, ProviderError, ProviderRegistry
+from review_analysis import AnalysisCancelled
 
 
 KEY = "synthetic-private-provider-key"
@@ -81,8 +83,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_network_policy_has_no_redirects_remote_cache_or_retries(self):
         registry = self.registry()
-        response = type("Response", (), {"__enter__": lambda value: value, "__exit__": lambda *args: None,
-                                         "read": lambda value, limit: json.dumps(completion()).encode()})()
+        response = io.BytesIO(json.dumps(completion()).encode())
         captured = []
         class Opener:
             def open(self, outgoing, timeout):
@@ -114,6 +115,45 @@ class ProviderTests(unittest.TestCase):
                          completion(usage={"prompt_tokens": True})]:
             with self.subTest(response=response), self.assertRaises(ProviderError):
                 self.registry(lambda payload: response).chat([{"role": "user", "content": "Synthetic"}])
+
+    def test_keepalive_bytes_cannot_extend_the_response_budget(self):
+        clock = [0]
+        class Heartbeats(io.BytesIO):
+            def read1(self, limit):
+                clock[0] += 30
+                return b" "
+        body = Heartbeats()
+        with patch("llm_provider.time.monotonic", side_effect=lambda: clock[0]), patch("llm_provider.request.build_opener") as build:
+            build.return_value.open.return_value = body
+            with self.assertRaises(ProviderError) as caught:
+                self.registry().chat([{"role": "user", "content": "Synthetic"}])
+        self.assertEqual(caught.exception.code, "connection")
+        self.assertEqual(clock[0], 120)
+        self.assertTrue(body.closed)
+        self.assertEqual(build.return_value.open.call_count, 1)
+
+    def test_cancellation_during_provider_heartbeat_closes_response(self):
+        cancelled = [False]
+        class Heartbeats(io.BytesIO):
+            def read1(self, limit):
+                cancelled[0] = True
+                return b" "
+        body = Heartbeats()
+        with patch("llm_provider.request.build_opener") as build:
+            build.return_value.open.return_value = body
+            with self.assertRaises(AnalysisCancelled):
+                self.registry().chat([{"role": "user", "content": "Synthetic"}], cancelled=lambda: cancelled[0])
+        self.assertTrue(body.closed)
+        self.assertEqual(build.return_value.open.call_count, 1)
+
+    def test_incremental_read_still_enforces_response_size(self):
+        body = io.BytesIO(b"x" * 1025)
+        with patch("llm_provider.MAX_BYTES", 1024), patch("llm_provider.request.build_opener") as build:
+            build.return_value.open.return_value = body
+            with self.assertRaises(ProviderError) as caught:
+                self.registry().chat([{"role": "user", "content": "S"}])
+        self.assertEqual(caught.exception.code, "invalid_response")
+        self.assertTrue(body.closed)
 
 
 if __name__ == "__main__":

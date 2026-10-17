@@ -6,6 +6,7 @@ import json
 import math
 import os
 import threading
+import time
 import re
 from decimal import Decimal, InvalidOperation
 from collections.abc import Mapping
@@ -17,6 +18,7 @@ from review_analysis import AnalysisCancelled, AnalysisError
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "openrouter/free"
 MAX_BYTES = 1024 * 1024
+RESPONSE_BUDGET_SECONDS = 120
 
 
 class ProviderError(AnalysisError):
@@ -106,16 +108,30 @@ class ProviderRegistry:
                 self._require_zdr = payload["require_zdr"]
         return self.public()
 
-    def _request(self, payload, key):
+    def _request(self, payload, key, *, cancelled=None):
         outgoing = request.Request(ENDPOINT, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                                    method="POST", headers={"Authorization": "Bearer " + key,
                                    "Content-Type": "application/json", "Accept": "application/json",
                                    "X-OpenRouter-Cache": "false"})
+        started = time.monotonic()
         try:
             with request.build_opener(_NoRedirect()).open(outgoing, timeout=40) as response:
-                body = response.read(MAX_BYTES + 1)
-            if len(body) > MAX_BYTES:
-                raise ProviderError("The provider response was too large.", code="invalid_response")
+                body = bytearray()
+                while True:
+                    _cancel(cancelled)
+                    if time.monotonic() - started >= RESPONSE_BUDGET_SECONDS:
+                        raise ProviderError("The free provider did not finish within the response budget. Its attempt remains counted.", code="connection")
+                    # read1 returns available bytes, including provider heartbeats.
+                    # A buffered read(n) can wait indefinitely for n bytes or EOF.
+                    part = response.read1(min(65_536, MAX_BYTES + 1 - len(body)))
+                    _cancel(cancelled)
+                    if time.monotonic() - started >= RESPONSE_BUDGET_SECONDS:
+                        raise ProviderError("The free provider did not finish within the response budget. Its attempt remains counted.", code="connection")
+                    if not part:
+                        break
+                    body.extend(part)
+                    if len(body) > MAX_BYTES:
+                        raise ProviderError("The provider response was too large.", code="invalid_response")
             return _loads(body.decode("utf-8"))
         except error.HTTPError as exc:
             status = exc.code
@@ -136,7 +152,7 @@ class ProviderRegistry:
             if status == 402:
                 raise ProviderError("OpenRouter declined the account or key budget. No paid fallback was attempted.", code="budget") from None
             raise ProviderError("OpenRouter could not complete this request. No paid fallback was attempted.", code="unavailable") from None
-        except ProviderError:
+        except (ProviderError, AnalysisCancelled):
             raise
         except (OSError, ValueError, UnicodeError, RecursionError):
             raise ProviderError("The provider request could not finish. Its attempt remains counted for safety.", code="connection") from None
@@ -188,7 +204,7 @@ class ProviderRegistry:
         try:
             if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > MAX_BYTES:
                 raise ProviderError("The model request is too large.", code="invalid_request")
-            result = (transport or self._transport)(payload) if (transport or self._transport) else self._request(payload, key)
+            result = (transport or self._transport)(payload) if (transport or self._transport) else self._request(payload, key, cancelled=cancelled)
             if not isinstance(result, Mapping):
                 raise ProviderError("The provider returned an error instead of an answer.", code="invalid_response")
             safe_usage = self._usage(result.get("usage", {}))
