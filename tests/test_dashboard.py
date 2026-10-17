@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -16,6 +17,7 @@ from dashboard import DashboardHandler, DashboardServer
 from dashboard_data import DashboardData, MAX_IMPORT_BYTES, ReviewQuery, spreadsheet_cell
 from offline import DEMO_CSV
 from review_store import REVIEW_FIELDS, ReviewStore
+from llm_provider import ProviderError, ProviderRegistry
 
 
 class DashboardTests(unittest.TestCase):
@@ -26,6 +28,12 @@ class DashboardTests(unittest.TestCase):
         self.data = DashboardData(self.folder / "data")
         self.data.seed_demo()
         self.server = DashboardServer(("127.0.0.1", 0), self.data)
+        self.server.automation._provider_registry = ProviderRegistry(environ={})
+        self.server.automation._settings = lambda: {"configured": False, "model": ""}
+        self.server.automation._session_reader = lambda path: {"exists": False, "valid": False, "detail": "Synthetic session status."}
+        provider_guard = patch.object(self.server.automation._provider_registry, "chat", side_effect=AssertionError("No provider call is allowed in dashboard tests."))
+        provider_guard.start()
+        self.addCleanup(provider_guard.stop)
         quiet_log = patch.object(DashboardHandler, "log_message")
         quiet_log.start()
         self.addCleanup(quiet_log.stop)
@@ -345,6 +353,137 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("script-src 'self'", headers["Content-Security-Policy"])
             self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
             self.assertNotIn("Access-Control-Allow-Origin", headers)
+
+    def post_json(self, path, payload, **headers):
+        return self.request(path, method="POST", body=json.dumps(payload).encode("utf-8"), headers={
+            "Content-Type": "application/json", "X-Reviewdesk-Request": "1", **headers,
+        })
+
+    def test_provider_settings_are_sanitized_and_session_keys_never_reach_databases(self):
+        public = self.get_json("/api/provider")
+        self.assertEqual(public["key_source"], "none")
+        self.assertFalse(public["configured"])
+        self.assertTrue(public["free_only"])
+        status, _, content = self.post_json("/api/provider", {"api_key": "SYNTHETIC-PRIVATE-KEY", "require_zdr": True})
+        self.assertEqual(status, 200, content)
+        public = json.loads(content)
+        self.assertEqual(public["key_source"], "session")
+        self.assertTrue(public["require_zdr"])
+        self.assertNotIn("PRIVATE-KEY", content.decode())
+        status, _, content = self.post_json("/api/provider", {"require_zdr": False})
+        self.assertEqual(status, 200, content)
+        self.assertFalse(json.loads(content)["require_zdr"])
+        capabilities = self.get_json("/api/automation")["capabilities"]
+        self.assertTrue(capabilities["openrouter_configured"])
+        self.assertEqual(capabilities["openrouter_model"], "openrouter/free")
+        self.assertTrue(capabilities["free_only"])
+        for filename in ("jobs.sqlite3", "analysis.sqlite3"):
+            self.assertNotIn(b"SYNTHETIC-PRIVATE-KEY", (self.data.data_dir / filename).read_bytes())
+        status, _, content = self.post_json("/api/provider", {"clear": True})
+        self.assertEqual(status, 200, content)
+        self.assertFalse(self.get_json("/api/provider")["configured"])
+
+    def test_provider_settings_require_local_origin_json_and_strict_options(self):
+        payload = b'{"api_key":"SYNTHETIC-KEY"}'
+        attempts = [
+            ({"Content-Type": "application/json"}, 403),
+            ({"Content-Type": "text/plain", "X-Reviewdesk-Request": "1"}, 415),
+            ({"Content-Type": "application/json", "X-Reviewdesk-Request": "1", "Origin": "https://example.invalid"}, 403),
+        ]
+        for headers, expected in attempts:
+            status, _, content = self.request("/api/provider", method="POST", body=payload, headers=headers)
+            self.assertEqual(status, expected, content)
+        for options in [{}, {"api_key": ""}, {"api_key": "x", "clear": True}, {"require_zdr": 1}, {"model": "paid-model"}, {"clear": False}]:
+            status, _, content = self.post_json("/api/provider", options)
+            self.assertEqual(status, 400, content)
+        for body in [b'{"api_key":"one","api_key":"two"}', b'{"require_zdr":NaN}', b" " * 16385]:
+            status, _, _ = self.request("/api/provider", method="POST", body=body, headers={"Content-Type": "application/json", "X-Reviewdesk-Request": "1"})
+            self.assertEqual(status, 413 if len(body) > 16384 else 400)
+        self.assertEqual(self.request("/api/provider?extra=yes")[0], 400)
+        self.assertEqual(self.post_json("/api/provider?extra=yes", {"clear": True})[0], 400)
+        self.assertFalse(self.get_json("/api/provider")["configured"])
+
+    def test_analysis_plan_is_read_only_unconfigured_and_rejects_ambiguous_scope(self):
+        before = {path.name: path.read_bytes() for path in self.data.data_dir.glob("*.sqlite3")}
+        plan = self.get_json("/api/analysis/plan?dataset=demo&depth=deep")
+        self.assertEqual(plan["depth"], "deep")
+        self.assertEqual(plan["total_reviews"], 15)
+        self.assertEqual(plan["provider"], "openrouter")
+        self.assertEqual({path.name: path.read_bytes() for path in self.data.data_dir.glob("*.sqlite3")}, before)
+        self.assertFalse(self.get_json("/api/provider")["configured"])
+        for query in ["dataset=other", "depth=all", "dataset=demo&dataset=workspace", "asin=BAD", "question=hello"]:
+            status, _, content = self.request("/api/analysis/plan?" + query)
+            self.assertEqual(status, 400, (query, content))
+
+    def test_exact_research_http_job_runs_without_a_key_and_makes_zero_provider_calls(self):
+        status, _, content = self.post_json("/api/jobs", {"kind": "research", "dataset": "demo", "question": "How many reviews are stored?"})
+        self.assertEqual(status, 202, content)
+        job_id = json.loads(content)["job"]["id"]
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            job = self.server.automation.get_job(job_id)
+            if job["status"] not in {"queued", "running", "cancelling"}:
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertEqual(job["result"]["usage"]["calls"], 0)
+        self.assertEqual(job["result"]["method"], "local")
+        self.assertIn("15", job["result"]["answer"])
+        self.assertIsNone(self.get_json("/api/analysis?dataset=demo")["report"])
+        self.assertEqual(self.post_json("/api/jobs", {"kind": "research", "question": "Which battery complaints recur?"})[0], 400)
+        self.assertEqual(self.post_json("/api/jobs", {"kind": "analysis", "analysis_method": "openrouter", "allow_external": True})[0], 400)
+
+    def test_http_provider_errors_do_not_echo_messages_or_unsafe_retry_values(self):
+        failure = ProviderError("RAW-REQUEST-SECRET", code="rate_limit", retry_after=12.2)
+        with patch.object(self.server.automation, "analysis_plan", side_effect=failure):
+            status, _, content = self.request("/api/analysis/plan?dataset=demo")
+        self.assertEqual(status, 429, content)
+        self.assertEqual(json.loads(content)["code"], "rate_limit")
+        self.assertEqual(json.loads(content)["retry_after"], 13)
+        self.assertNotIn("RAW-REQUEST-SECRET", content.decode())
+        failure = ProviderError("RAW-REQUEST-SECRET", code="RAW-REQUEST-SECRET", retry_after=float("inf"))
+        with patch.object(self.server.automation, "analysis_plan", side_effect=failure):
+            status, _, content = self.request("/api/analysis/plan?dataset=demo")
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(content)["code"], "provider_error")
+        self.assertNotIn("retry_after", json.loads(content))
+        self.assertNotIn("RAW-REQUEST-SECRET", content.decode())
+
+    def test_openrouter_http_job_uses_a_fake_transport_and_reuses_its_validated_report(self):
+        sent = []
+        def transport(payload):
+            sent.append(payload)
+            entry = json.loads(payload["messages"][-1]["content"])["reviews"][0]
+            content = json.dumps({"summary": "A fictional review describes product use.",
+                "themes": [{"label": "Use", "explanation": "One checked example.",
+                            "evidence": [{"key": entry["key"], "quote": (entry["body"] or entry["title"])[:80]}]}],
+                "limitations": ["A test interpretation."]})
+            return {"model": "fictional/model:free", "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0},
+                    "choices": [{"finish_reason": "stop", "message": {"content": content}}]}
+        self.server.automation._provider_registry = ProviderRegistry(environ={}, transport=transport)
+        self.assertEqual(self.post_json("/api/provider", {"api_key": "SYNTHETIC-INTEGRATION-SECRET"})[0], 200)
+        payload = {"kind": "analysis", "dataset": "demo", "analysis_method": "openrouter", "depth": "quick", "allow_external": True}
+        for index in range(2):
+            status, _, content = self.post_json("/api/jobs", payload)
+            self.assertEqual(status, 202, content)
+            job_id = json.loads(content)["job"]["id"]
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                job = self.server.automation.get_job(job_id)
+                if job["status"] not in {"queued", "running", "cancelling"}:
+                    break
+                threading.Event().wait(0.01)
+            self.assertEqual(job["status"], "succeeded", job)
+            self.assertEqual(job["result"]["cached"], index == 1)
+        report = self.get_json("/api/analysis?dataset=demo")["report"]
+        self.assertEqual(report["method"], "openrouter")
+        self.assertTrue(report["scope"]["analysis_complete"])
+        self.assertEqual(report["usage"]["calls"], 1)
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn("SYNTHETIC-INTEGRATION-SECRET", json.dumps(sent))
+        self.assertNotIn("B0DEMO", json.dumps(sent))
+        for filename in ("jobs.sqlite3", "analysis.sqlite3"):
+            self.assertNotIn(b"SYNTHETIC-INTEGRATION-SECRET", (self.data.data_dir / filename).read_bytes())
 
 
 if __name__ == "__main__":

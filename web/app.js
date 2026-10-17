@@ -3,7 +3,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const svgNS = "http://www.w3.org/2000/svg";
-  const validViews = new Set(["overview", "reviews", "products", "collection", "analysis"]);
+  const validViews = new Set(["overview", "reviews", "products", "collection", "analysis", "research"]);
   function preference(key) {
     try { return localStorage.getItem(key); } catch { return null; }
   }
@@ -18,6 +18,9 @@
     automationPromise: null, automationPending: false,
     pollTimer: null, mutation: false, jobStatuses: new Map(), jobRenderKey: "", analysisJobKey: "",
     analysis: null, analysisVersion: 0, analysisController: null, analysisLoading: false,
+    provider: null, providerVersion: 0, providerSaving: false, providerPolicyDirty: false,
+    plan: null, planVersion: 0, planController: null, planLoading: false, planError: null,
+    researchRenderKey: "", researchJobKey: "",
   };
   const viewCopy = {
     overview: ["Review overview", "Explore feedback, compare products, and keep the evidence close."],
@@ -25,10 +28,23 @@
     products: ["Your products", "Compare the feedback, then explore the reviews behind each product."],
     collection: ["Collect. Save. Understand.", "Bring product reviews into your workspace, with progress you can pick up again."],
     analysis: ["From feedback to findings", "Explore patterns, see the limits, and check the reviews behind every theme."],
+    research: ["Ask your reviews", "Start with a question. Follow the evidence in your saved reviews."],
   };
   const number = (value) => new Intl.NumberFormat().format(Number(value) || 0);
   const average = (value) => value === null || value === undefined || value === "" ? "N/A" : Number(value).toFixed(1);
   const percent = (value) => `${Math.round(Number(value) || 0)}%`;
+  const localQuestions = new Set([
+    "how many reviews", "how many reviews are there", "how many reviews are stored",
+    "how many reviews are in this selection", "how many reviews are in this dataset",
+    "how many reviews are in this workspace", "how many reviews do we have",
+    "how many reviews do i have", "total reviews", "review count", "what is the review count",
+    "what is the total review count", "count reviews", "count the reviews",
+    "what is the average rating", "average rating", "what is the mean rating", "mean rating",
+    "show the average rating", "show average rating", "rating distribution", "ratings distribution",
+    "what is the rating distribution", "show rating distribution", "show the rating distribution",
+    "rating breakdown", "show rating breakdown", "show the rating breakdown",
+  ]);
+  const isLocalQuestion = (question) => localQuestions.has(String(question).toLowerCase().replace(/\s+/g, " ").trim().replace(/[.?!]+$/, "").trim());
   const isVerified = (value) => value === true || value === 1 || String(value).toLowerCase() === "true";
   const plural = (count, noun) => `${number(count)} ${noun}${Number(count) === 1 ? "" : "s"}`;
   function node(tag, className, textValue) {
@@ -100,7 +116,11 @@
     }
     if (!response.ok) {
       let message = `The request failed (${response.status}). Please try again.`;
-      try { const data = await response.json(); if (data.error) message = data.error; } catch { /* Keep the readable fallback. */ }
+      try {
+        const data = await response.json();
+        if (data.error) message = data.error;
+        if (data.retry_after != null && Number.isFinite(Number(data.retry_after))) message += ` Wait at least ${number(Math.ceil(Number(data.retry_after)))} seconds before trying again. Retries are manual.`;
+      } catch { /* Keep the readable fallback. */ }
       throw new Error(message);
     }
     return response;
@@ -128,16 +148,16 @@
     if (!validViews.has(view)) view = "overview";
     const changed = state.view !== view;
     state.view = view;
-    document.querySelectorAll(".view").forEach((section) => { section.hidden = section.id !== `view-${view}` || (!state.overview && !["collection", "analysis"].includes(view)); });
-    $("page-error").hidden = !state.overviewError || ["collection", "analysis"].includes(view);
-    $("loading-panel").hidden = Boolean(state.overview) || ["collection", "analysis"].includes(view) || Boolean(state.overviewError);
-    if (["collection", "analysis"].includes(view)) $("main-content").setAttribute("aria-busy", "false");
+    document.querySelectorAll(".view").forEach((section) => { section.hidden = section.id !== `view-${view}` || (!state.overview && !["collection", "analysis", "research"].includes(view)); });
+    $("page-error").hidden = !state.overviewError || ["collection", "analysis", "research"].includes(view);
+    $("loading-panel").hidden = Boolean(state.overview) || ["collection", "analysis", "research"].includes(view) || Boolean(state.overviewError);
+    if (["collection", "analysis", "research"].includes(view)) $("main-content").setAttribute("aria-busy", "false");
     document.querySelectorAll("[data-view]").forEach((link) => {
       const active = link.dataset.view === view;
       link.classList.toggle("active", active);
       if (active) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
     });
-    const pageLabel = view.charAt(0).toUpperCase() + view.slice(1);
+    const pageLabel = view === "research" ? "Ask reviews" : view.charAt(0).toUpperCase() + view.slice(1);
     $("breadcrumb-page").textContent = pageLabel;
     $("page-title").textContent = viewCopy[view][0];
     $("page-subtitle").textContent = viewCopy[view][1];
@@ -147,6 +167,7 @@
     if (view === "reviews" && state.overview && (changed || !state.reviews)) loadReviews();
     if (view === "analysis" && changed) loadAnalysis();
     if (view === "collection" && changed) loadAutomation();
+    if (view === "research" && changed) { renderResearch(); loadAutomation(); }
     if (changed) window.scrollTo({ top: 0, left: 0, behavior: "auto" });
     if (focus) $("main-content").focus({ preventScroll: true });
   }
@@ -181,11 +202,11 @@
     ++state.reviewVersion;
     if (!silent) { state.overview = null; state.reviews = null; }
     state.overviewError = null;
-    $("loading-panel").hidden = silent || ["collection", "analysis"].includes(state.view);
+    $("loading-panel").hidden = silent || ["collection", "analysis", "research"].includes(state.view);
     $("page-error").hidden = true;
     $("export-button").disabled = true;
-    if (!silent) document.querySelectorAll(".view").forEach((section) => { section.hidden = section.id !== `view-${state.view}` || !["collection", "analysis"].includes(state.view); });
-    $("main-content").setAttribute("aria-busy", String(!["collection", "analysis"].includes(state.view)));
+    if (!silent) document.querySelectorAll(".view").forEach((section) => { section.hidden = section.id !== `view-${state.view}` || !["collection", "analysis", "research"].includes(state.view); });
+    $("main-content").setAttribute("aria-busy", String(!["collection", "analysis", "research"].includes(state.view)));
     try {
       const response = await request(`/api/overview?${queryString()}`, { signal: state.overviewController.signal });
       const data = await response.json();
@@ -200,7 +221,7 @@
       connection(false);
       state.overviewError = error.message;
       $("page-error-message").textContent = error.message || "Please check that the local server is still running.";
-      $("page-error").hidden = ["collection", "analysis"].includes(state.view);
+      $("page-error").hidden = ["collection", "analysis", "research"].includes(state.view);
       if (!state.overview) {
         $("collection-list").replaceChildren();
         empty($("collection-empty"), "Saved product progress is unavailable", "Collection controls still work. Check the local database or server terminal, then refresh this section.", "info");
@@ -455,13 +476,13 @@
       const message = `${plural(data.inserted, "review")} imported. ${plural(data.duplicates, "duplicate")} skipped. ${plural(data.total_reviews, "review")} now in My workspace.`;
       importMessage(message);
       state.dataset = "workspace"; $("dataset-select").value = "workspace"; savePreference("reviewdesk-dataset", "workspace");
-      $("analysis-consent").checked = false; $("analysis-product").value = "";
+      $("analysis-consent").checked = false; $("research-consent").checked = false; $("analysis-product").value = "";
       updateWorkflowControls();
       resetFilters();
       state.file = null; $("csv-file").value = "";
       $("file-label").textContent = "Choose another CSV or drop it here"; $("file-description").textContent = "UTF-8 CSV, up to 5 MB";
       await loadOverview();
-      loadAnalysis();
+      loadAnalysis(); loadAnalysisPlan(); renderResearch();
       toast(message);
     } catch (error) { importMessage(error.message || "We couldn't import this CSV. Please try again.", true); }
     finally {
@@ -486,7 +507,7 @@
   }
   const activeStatuses = new Set(["queued", "running", "cancelling"]);
   const retryStatuses = new Set(["paused", "blocked", "failed", "cancelled", "interrupted"]);
-  const jobLabels = { collection: "Review collection", analysis: "Review analysis", auth: "Manual sign-in" };
+  const jobLabels = { collection: "Review collection", analysis: "Review analysis", auth: "Manual sign-in", research: "Review research" };
   function messageAt(id, message) {
     $(id).textContent = message || "";
     $(id).hidden = !message;
@@ -497,18 +518,20 @@
     return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
   }
   function syncAnalysisProducts() {
-    const select = $("analysis-product"), selected = select.value;
     const products = state.overview?.products || [];
     const key = JSON.stringify(products.map((product) => [product.asin, product.name]));
-    if (select.dataset.products === key) return;
-    select.dataset.products = key;
-    const all = node("option", "", "All products"); all.value = "";
-    select.replaceChildren(all);
-    for (const product of products) {
-      const option = node("option", "", product.name || product.asin);
-      option.value = product.asin; select.append(option);
+    for (const id of ["analysis-product", "research-product"]) {
+      const select = $(id), selected = select.value;
+      if (select.dataset.products === key) continue;
+      select.dataset.products = key;
+      const all = node("option", "", "All products"); all.value = "";
+      select.replaceChildren(all);
+      for (const product of products) {
+        const option = node("option", "", product.name || product.asin);
+        option.value = product.asin; select.append(option);
+      }
+      select.value = products.some((product) => product.asin === selected) ? selected : "";
     }
-    select.value = products.some((product) => product.asin === selected) ? selected : "";
   }
   function updateWorkflowControls() {
     const data = state.automation, active = data?.active_job;
@@ -522,17 +545,41 @@
     $("auth-save").disabled = !canSave || state.mutation;
     $("collection-submit").disabled = !data || state.mutation || busy || !browserReady || !sessionReady;
     $("collection-submit").lastElementChild.textContent = state.mutation ? "Please wait..." : "Start collection";
-    const configured = Boolean(data?.capabilities?.openai_configured);
+    const configured = Boolean(data?.capabilities?.openai_configured), router = routerStatus();
+    const routerReady = router.configured;
     $("openai-option").disabled = !configured;
     $("openai-option").textContent = configured ? `OpenAI${data.capabilities.model ? ` (${data.capabilities.model})` : ""}` : "OpenAI, not configured";
     if (!configured && $("analysis-method").value === "openai") $("analysis-method").value = "local";
-    const external = $("analysis-method").value === "openai";
+    const method = $("analysis-method").value, external = method !== "local", useRouter = method === "openrouter";
     $("analysis-consent-wrap").hidden = !external;
-    $("analysis-method-help").textContent = external ? "OpenAI interprets the selected review text. Check source evidence and review the provider's output." : "Local analysis groups common terms and uses review ratings. It does not call a language model.";
-    $("analysis-submit").disabled = !data || state.mutation || busy || (external && (!configured || !$("analysis-consent").checked));
+    $("analysis-depth-wrap").hidden = !useRouter;
+    $("analysis-provider-note").hidden = !useRouter || routerReady;
+    $("analysis-provider-note").firstElementChild.textContent = router.disabled ? "Free AI requests are disabled after a provider cost signal. Check AI settings and the provider account." : "Add your OpenRouter key to use free model analysis.";
+    $("analysis-method-help").textContent = useRouter ? "Free model analysis with a bounded call budget and saved chunk results. Broader coverage can take several runs." : external ? "OpenAI interprets the selected review text. Check source evidence and review the provider's output." : "Local analysis groups common terms and uses review ratings. It does not call a language model.";
+    $("analysis-consent-label").textContent = useRouter ? "Send the selected review text to OpenRouter" : "Send the selected review text to OpenAI";
+    $("analysis-consent-detail").textContent = useRouter ? "Free models only, with no paid fallback. Review text leaves this device when you start the run." : "Uses your configured API key and may incur charges. Review text is shared with the provider.";
+    const ready = useRouter ? routerReady : configured;
+    $("analysis-submit").disabled = !data || state.mutation || busy || (external && (!ready || !$("analysis-consent").checked)) || (useRouter && (state.planLoading || !state.plan || Boolean(state.planError)));
     $("analysis-submit").lastElementChild.textContent = state.mutation ? "Please wait..." : "Run analysis";
     $("browser-setup").hidden = !data || browserReady;
     $("jobs-live-label").hidden = !busy;
+    $("research-submit").disabled = !data || state.mutation || busy;
+    $("research-submit").lastElementChild.textContent = state.mutation ? "Please wait..." : "Ask reviews";
+    const local = isLocalQuestion($("research-question").value);
+    $("research-consent").disabled = !routerReady || local;
+    $("research-consent-wrap").hidden = local;
+    $("research-help").textContent = local ? "This exact statistics question runs locally. No model call or API key is needed." : "Exact count, average rating, and rating distribution prompts can run locally. Filtered questions and other research use OpenRouter with your permission.";
+    $("research-provider-note").hidden = routerReady;
+    $("research-provider-note").firstElementChild.textContent = router.disabled ? "AI research is disabled after a cost signal. Check AI settings. Local statistics questions still work." : "Local questions work now. Add an OpenRouter key for model research.";
+    $("provider-save").disabled = state.providerSaving || busy;
+    $("provider-key").disabled = state.providerSaving || busy || state.provider?.key_source === "environment";
+    $("provider-zdr").disabled = state.providerSaving || busy;
+    $("provider-clear").disabled = state.providerSaving || busy || state.provider?.key_source !== "session";
+  }
+  function routerStatus() {
+    const capabilities = state.automation?.capabilities;
+    const disabled = Boolean(state.provider?.disabled || capabilities?.openrouter_disabled);
+    return { disabled, configured: !disabled && Boolean(capabilities?.openrouter_configured ?? state.provider?.configured) };
   }
   function jobAction(label, job, action, iconName) {
     const control = button(label, "button button-white button-small", action, iconName);
@@ -543,7 +590,7 @@
   function jobCard(job, compact = false) {
     const card = node("article", `panel job-card${compact ? " compact-job" : ""}`);
     const header = node("div", "job-header"), identity = node("div", "job-identity");
-    const mark = node("span", "job-mark"); mark.append(icon(job.kind === "analysis" ? "spark" : job.kind === "auth" ? "shield" : "layers"));
+    const mark = node("span", "job-mark"); mark.append(icon(job.kind === "analysis" ? "spark" : job.kind === "research" ? "search" : job.kind === "auth" ? "shield" : "layers"));
     const copy = node("div"); copy.append(node("h3", "", jobLabels[job.kind] || "Background job"), node("p", "job-date", timeLabel(job.created_at)));
     identity.append(mark, copy);
     const badge = node("span", `badge job-status status-${job.status}`, String(job.status || "unknown").replaceAll("_", " ").toUpperCase());
@@ -562,8 +609,22 @@
       for (const [label, value] of values) { const item = node("div"); item.append(node("dd", "", value), node("dt", "", label)); metrics.append(item); }
       card.append(metrics);
     }
+    if (job.kind === "analysis" || job.kind === "research" || job.phase === "analysing") {
+      const values = [];
+      if (progress.chunks_done != null && progress.chunks_total != null) values.push(["Text chunks processed", `${number(progress.chunks_done)} / ${number(progress.chunks_total)}`]);
+      if (progress.calls != null) values.push(["Model calls", `${number(progress.calls)}${progress.max_calls != null ? ` / ${number(progress.max_calls)}` : ""}`]);
+      if (progress.chunks_cached != null) values.push(["Cached chunks", number(progress.chunks_cached)]);
+      if (progress.tools_used != null) values.push(["Data lookups", number(progress.tools_used)]);
+      if (values.length) {
+        const metrics = node("dl", "job-metrics");
+        for (const [label, value] of values) { const item = node("div"); item.append(node("dd", "", value), node("dt", "", label)); metrics.append(item); }
+        card.append(metrics);
+      }
+    }
+    if (job.kind === "research" && job.options?.question) card.append(node("p", "job-question", job.options.question));
     if (job.detail) card.append(node("p", "job-detail", job.detail));
     if (job.error && job.error !== job.detail) card.append(node("p", "job-error", job.error));
+    if (job.result?.retry_after != null && Number.isFinite(Number(job.result.retry_after))) card.append(node("p", "job-detail", `Provider retry guidance: wait at least ${number(Math.ceil(Number(job.result.retry_after)))} seconds before trying again. No automatic retry or paid fallback will run.`));
     const actions = node("div", "job-actions");
     if (isActive && job.kind === "auth" && job.status === "running" && job.phase === "awaiting_login") {
       const note = node("p", "field-help", "Complete sign-in in the opened browser, then save the session here."); card.append(note);
@@ -580,6 +641,13 @@
       if (["demo", "workspace"].includes(dataset) && dataset !== state.dataset) chooseDataset(dataset);
       $("analysis-product").value = job.options?.asin || "";
       navigate("analysis", true); loadAnalysis();
+    }, "arrow"));
+    if (!isActive && job.kind === "research") actions.append(jobAction(job.status === "succeeded" ? "View answer" : "Review question", job, () => {
+      if (job.options?.dataset && job.options.dataset !== state.dataset) chooseDataset(job.options.dataset);
+      $("research-product").value = job.options?.asin || "";
+      $("research-question").value = job.options?.question || "";
+      $("research-consent").checked = false;
+      navigate("research", true); renderResearch();
     }, "arrow"));
     if (actions.children.length) card.append(actions);
     return card;
@@ -623,6 +691,7 @@
       preserveJobFocus($("analysis-job"), () => $("analysis-job").replaceChildren(...(analysisJob ? [jobCard(analysisJob, true)] : [])));
     }
     updateWorkflowControls();
+    renderResearch();
   }
   function schedulePoll() {
     clearTimeout(state.pollTimer);
@@ -657,13 +726,14 @@
       const data = await response.json();
       if (version !== state.automationVersion) return;
       const jobs = [...(data.jobs || []), ...(data.active_job ? [data.active_job] : [])];
-      let refreshData = false, refreshAnalysis = false;
+      let refreshData = false, refreshAnalysis = false, refreshProvider = false;
       for (const job of jobs) {
         const previous = state.jobStatuses.get(job.id);
         if (previous && activeStatuses.has(previous.status) && !activeStatuses.has(job.status)) {
           toast(`${jobLabels[job.kind] || "Job"}: ${String(job.status).replaceAll("_", " ")}.`);
           refreshData ||= job.kind === "collection";
           refreshAnalysis ||= job.kind === "analysis" || Boolean(job.result?.analysis_id);
+          refreshProvider ||= job.kind === "research" || job.options?.analysis_method === "openrouter";
         }
         if (job.kind === "collection" && previous && previous.inserted !== job.progress?.reviews_inserted) refreshData = true;
         state.jobStatuses.set(job.id, { status: job.status, inserted: job.progress?.reviews_inserted });
@@ -672,11 +742,13 @@
       $("automation-error-message").textContent = ""; $("automation-error").hidden = true;
       renderAutomation();
       if (refreshData && state.dataset === "workspace") {
-        $("analysis-consent").checked = false; updateWorkflowControls();
+        $("analysis-consent").checked = false; $("research-consent").checked = false; updateWorkflowControls();
         await loadOverview(true);
+        loadAnalysisPlan();
         if (state.view === "reviews") loadReviews();
       }
-      if (refreshAnalysis) loadAnalysis();
+      if (refreshAnalysis) { loadAnalysis(); loadAnalysisPlan(); }
+      if (refreshProvider) loadProvider();
     } catch (error) {
       if (error.name === "AbortError" || version !== state.automationVersion) return;
       $("automation-error-message").textContent = error.message;
@@ -688,6 +760,101 @@
   async function postJson(url, payload) {
     const response = await request(url, { method: "POST", headers: { "Content-Type": "application/json", "X-Reviewdesk-Request": "1" }, body: JSON.stringify(payload) });
     return response.json();
+  }
+  function providerMessage(message, error = false) {
+    messageAt("provider-result", message);
+    $("provider-result").classList.toggle("error", error);
+  }
+  function renderProvider() {
+    const provider = state.provider;
+    if (!provider) return;
+    $("provider-status-label").textContent = provider.disabled ? "REQUESTS DISABLED" : provider.configured ? "CONFIGURED" : "NOT CONNECTED";
+    $("provider-sidebar-status").textContent = provider.disabled ? "Check account" : provider.configured ? "Free models" : "Not connected";
+    $("provider-source-label").textContent = provider.key_source === "environment" ? "The key is managed in the server environment. Change it there and restart the server to replace it." : provider.key_source === "session" ? "A key is held in local server memory until restart. Its value is never returned to this page." : "Add a key for this local server session. Nothing is saved to browser storage.";
+    if (provider.disabled) $("provider-source-label").textContent = "A provider reported a nonzero cost. Further AI requests are disabled. Check the provider account before reconnecting or restarting the server.";
+    if (!state.providerPolicyDirty) $("provider-zdr").checked = Boolean(provider.require_zdr);
+    $("provider-budget-label").textContent = `App limit: up to ${number(provider.daily_limit)} model calls per day. Free model availability and provider limits may vary. Saving settings makes no model request.`;
+    $("provider-save").lastElementChild.textContent = provider.configured ? "Save settings" : "Use this key";
+    updateWorkflowControls();
+  }
+  async function loadProvider() {
+    const version = ++state.providerVersion;
+    try {
+      const response = await request("/api/provider"), data = await response.json();
+      if (version !== state.providerVersion) return;
+      state.provider = { configured: Boolean(data.configured), key_source: data.key_source, model: data.model, free_only: data.free_only, privacy: data.privacy, daily_limit: data.daily_limit, require_zdr: Boolean(data.require_zdr), disabled: Boolean(data.disabled) };
+      renderProvider();
+    } catch (error) {
+      if (version !== state.providerVersion) return;
+      $("provider-status-label").textContent = "UNAVAILABLE";
+      $("provider-sidebar-status").textContent = "Check setup";
+      providerMessage(error.message, true);
+    }
+  }
+  function openSettings() {
+    $("provider-key").value = ""; state.providerPolicyDirty = false; providerMessage(""); setMenu(false);
+    $("settings-dialog").showModal(); loadProvider();
+  }
+  async function saveProvider(event, clear = false) {
+    event?.preventDefault();
+    if (state.providerSaving) return;
+    const key = $("provider-key").value.trim();
+    if (!clear && !key && !state.provider?.configured) { providerMessage("Paste an OpenRouter key to connect free model analysis.", true); return; }
+    state.providerSaving = true; updateWorkflowControls(); providerMessage("Updating local server settings...");
+    const payload = { require_zdr: $("provider-zdr").checked };
+    if (clear) payload.clear = true;
+    else if (key) payload.api_key = key;
+    $("provider-key").value = "";
+    try {
+      await postJson("/api/provider", payload);
+      state.providerPolicyDirty = false;
+      await loadProvider();
+      $("analysis-consent").checked = false; $("research-consent").checked = false;
+      if (!clear && state.provider?.configured) $("analysis-method").value = "openrouter";
+      providerMessage(clear ? "The session key was forgotten. No model request was made." : "Settings updated. No model request was made.");
+      loadAnalysisPlan(); await loadAutomation();
+    } catch (error) {
+      const message = key ? String(error.message).split(key).join("[redacted]") : error.message;
+      providerMessage(message, true);
+    } finally {
+      $("provider-key").value = ""; state.providerSaving = false; updateWorkflowControls();
+    }
+  }
+  async function loadAnalysisPlan() {
+    state.planController?.abort(); state.planController = new AbortController();
+    const version = ++state.planVersion;
+    state.plan = null; state.planError = null;
+    const router = $("analysis-method").value === "openrouter";
+    $("analysis-plan").hidden = !router;
+    if (!router) { state.planLoading = false; updateWorkflowControls(); return; }
+    state.planLoading = true; $("analysis-plan").replaceChildren(node("p", "field-help", "Planning coverage and cached work locally...")); updateWorkflowControls();
+    try {
+      const params = new URLSearchParams({ dataset: state.dataset, asin: $("analysis-product").value, depth: $("analysis-depth").value });
+      const response = await request(`/api/analysis/plan?${params}`, { signal: state.planController.signal }), plan = await response.json();
+      if (version !== state.planVersion) return;
+      state.plan = plan; renderAnalysisPlan();
+    } catch (error) {
+      if (error.name === "AbortError" || version !== state.planVersion) return;
+      state.planError = error.message;
+      const retry = button("Try again", "text-button", loadAnalysisPlan, "refresh");
+      $("analysis-plan").replaceChildren(node("p", "form-message error", error.message), retry);
+    } finally {
+      if (version === state.planVersion) { state.planLoading = false; updateWorkflowControls(); }
+    }
+  }
+  function renderAnalysisPlan() {
+    const plan = state.plan;
+    if (!plan) return;
+    const heading = node("div", "plan-heading"); heading.append(node("strong", "", plan.depth === "deep" ? "Broader coverage, within a hard budget" : "A quick sample, within a hard budget"), node("span", "badge", "FREE MODELS ONLY"));
+    const grid = node("div", "plan-grid");
+    const values = [["Reviews selected", `${number(plan.selected_reviews)} / ${number(plan.total_reviews)}`], ["Calls in this run", `Up to ${number(plan.calls_this_run)}`], ["Cached chunks", `${number(plan.chunks_cached)} / ${number(plan.chunks_total)}`], ["App daily budget left", plan.daily_remaining == null ? "Not available" : number(plan.daily_remaining)]];
+    for (const [label, value] of values) { const item = node("div"); item.append(node("span", "", label), node("strong", "", value)); grid.append(item); }
+    const copy = node("p", "field-help", "This is a local plan. Availability may limit a run. Broader analysis saves completed chunks so later runs can reuse them.");
+    $("analysis-plan").replaceChildren(heading, grid, copy);
+    if (Array.isArray(plan.notes) && plan.notes.length) {
+      const details = node("details", "plan-notes"), summary = node("summary", "", "Coverage details"), list = node("ul");
+      for (const note of plan.notes) list.append(node("li", "", note)); details.append(summary, list); $("analysis-plan").append(details);
+    }
   }
   async function createJob(options, errorId) {
     if (state.mutation) return null;
@@ -715,11 +882,13 @@
     clearTimeout(state.searchTimer);
     state.dataset = dataset; $("dataset-select").value = dataset;
     savePreference("reviewdesk-dataset", dataset); resetFilters();
-    $("analysis-product").replaceChildren(node("option", "", "All products")); $("analysis-product").firstElementChild.value = "";
-    delete $("analysis-product").dataset.products;
+    for (const id of ["analysis-product", "research-product"]) {
+      $(id).replaceChildren(node("option", "", "All products")); $(id).firstElementChild.value = "";
+      delete $(id).dataset.products;
+    }
     state.analysis = null; $("analysis-report").hidden = true;
-    $("analysis-consent").checked = false;
-    loadOverview(); loadAnalysis();
+    $("analysis-consent").checked = false; $("research-consent").checked = false;
+    loadOverview(); loadAnalysis(); loadAnalysisPlan(); renderResearch();
   }
   async function startCollection(event) {
     event.preventDefault();
@@ -740,7 +909,7 @@
     if (urls.length > 10) { messageAt("collection-form-error", "Use no more than 10 products in one run."); return; }
     if (!Number.isInteger(pages) || pages < 1 || pages > 20 || urls.length * pages > 50) { messageAt("collection-form-error", "Choose 1 to 20 pages per product, with no more than 50 pages across this run."); return; }
     const job = await createJob({ kind: "collection", urls, max_pages: pages, resume: $("collection-resume").checked, transport: $("collection-transport").value, analyse: $("collection-analyse").checked, analysis_method: "local", allow_external: false }, "collection-form-error");
-    if (job) { $("analysis-consent").checked = false; updateWorkflowControls(); chooseDataset("workspace"); }
+    if (job) { $("analysis-consent").checked = false; $("research-consent").checked = false; updateWorkflowControls(); chooseDataset("workspace"); }
   }
   function fillCollection(job) {
     const options = job.options || {};
@@ -778,10 +947,105 @@
   async function startAnalysis(event) {
     event.preventDefault();
     const method = $("analysis-method").value, consent = $("analysis-consent").checked;
-    if (method === "openai" && !consent) { messageAt("analysis-form-error", "Choose local analysis or explicitly allow the selected review text to be sent to OpenAI."); return; }
-    const job = await createJob({ kind: "analysis", dataset: state.dataset, asin: $("analysis-product").value, analysis_method: method, allow_external: method === "openai" && consent }, "analysis-form-error");
-    if (job) $("analysis-consent").checked = false;
+    if (method !== "local" && !consent) { messageAt("analysis-form-error", "Choose a local scan or explicitly allow the selected review text to be sent to the model provider."); return; }
+    const options = { kind: "analysis", dataset: state.dataset, asin: $("analysis-product").value, analysis_method: method, allow_external: method !== "local" && consent };
+    if (method === "openrouter") options.depth = $("analysis-depth").value;
+    const job = await createJob(options, "analysis-form-error");
+    if (job) { $("analysis-consent").checked = false; $("research-consent").checked = false; }
     updateWorkflowControls();
+  }
+  function usageSummary(usage, model = "", label = "") {
+    const section = node("div", "model-usage");
+    if (label) section.append(node("strong", "usage-label", label));
+    const facts = [];
+    if (usage && Number.isFinite(Number(usage.calls))) facts.push(`${plural(usage.calls, "model call")}`);
+    if (usage && Number.isFinite(Number(usage.cached_chunks))) facts.push(`${plural(usage.cached_chunks, "cached chunk")}`);
+    if (usage?.usage_available !== false && usage?.input_tokens != null) facts.push(`${number(usage.input_tokens)} input tokens`);
+    if (usage?.usage_available !== false && usage?.output_tokens != null) facts.push(`${number(usage.output_tokens)} output tokens`);
+    if (facts.length) section.append(node("p", "", facts.join(" · ")));
+    const models = Array.isArray(usage?.models) ? [...new Set(usage.models)] : [];
+    if (models.length) section.append(node("p", "usage-models", `Model${models.length === 1 ? "" : "s"} returned: ${models.join(", ")}`));
+    else if (model) section.append(node("p", "usage-models", `Configured model route: ${model}`));
+    return section;
+  }
+  async function startResearch(event) {
+    event.preventDefault();
+    const question = $("research-question").value.trim();
+    if (!question) { messageAt("research-form-error", "Add a question about your stored reviews."); return; }
+    if (question.length > 1500) { messageAt("research-form-error", "Keep the question within 1,500 characters."); return; }
+    const local = isLocalQuestion(question), router = routerStatus();
+    if (!local && !router.configured) { messageAt("research-form-error", router.disabled ? "AI research is disabled after a cost signal. Check the provider account and AI settings. Exact local statistics questions still work." : "Set up OpenRouter in AI settings for this question, or use one of the exact local statistics prompts."); return; }
+    if (!local && !$("research-consent").checked) { messageAt("research-form-error", "Allow the question and selected review evidence to be sent to OpenRouter before starting model research."); return; }
+    const job = await createJob({ kind: "research", question, dataset: state.dataset, asin: $("research-product").value, allow_external: !local && $("research-consent").checked && router.configured }, "research-form-error");
+    if (job) $("research-consent").checked = false;
+    updateWorkflowControls(); renderResearch();
+  }
+  function researchCard(job) {
+    const result = job.result, card = node("article", "panel research-answer");
+    const question = node("div", "research-question-line"); question.append(icon("message"), node("h3", "", job.options?.question || result?.question || "Review question")); card.append(question);
+    const provenance = node("div", "research-answer-meta");
+    provenance.append(node("span", "badge", result?.method === "local" ? "LOCAL ANSWER" : job.status === "succeeded" ? "OPENROUTER FREE" : String(job.status).toUpperCase()), node("span", "", timeLabel(job.updated_at)));
+    card.append(provenance);
+    if (job.status !== "succeeded" || !result?.answer) {
+      card.append(node("p", "job-error", job.detail || job.error || "This question could not be completed."));
+      if (result?.retry_after != null && Number.isFinite(Number(result.retry_after))) card.append(node("p", "field-help", `Provider guidance: wait at least ${number(Math.ceil(Number(result.retry_after)))} seconds before another attempt. Retries are manual.`));
+      card.append(button("Review this question", "text-button", () => {
+        $("research-question").value = job.options?.question || ""; $("research-consent").checked = false;
+        $("research-question").focus(); toast("Question restored. Check it and sharing consent before trying again.");
+      }, "refresh"));
+      return card;
+    }
+    card.append(node("p", "research-answer-text", result.answer));
+    const usage = usageSummary(result.usage, result.method === "local" ? "" : result.model);
+    if (usage.children.length) card.append(usage);
+    const scope = result.scope || {};
+    const scopeFacts = [];
+    if (scope.total_reviews != null) scopeFacts.push(`${plural(scope.total_reviews, "stored review")}`);
+    if (scope.analysed_reviews != null) scopeFacts.push(`${number(scope.analysed_reviews)} examined`);
+    if (scopeFacts.length) card.append(node("p", "research-coverage", scopeFacts.join(" · ")));
+    const sources = Array.isArray(result.evidence) ? result.evidence : [];
+    if (sources.length) {
+      const evidence = node("div", "research-evidence"), title = node("h4", "", "Source reviews"); evidence.append(title);
+      for (const source of sources.slice(0, 8)) {
+        const entry = node("div", "evidence-card");
+        if (source.quote) entry.append(node("blockquote", "", source.quote));
+        const open = button("Read source review", "text-button", () => openEvidence(source, job.options.dataset, open), "arrow");
+        const footer = node("div", "evidence-source"); footer.append(node("code", "", source.asin), open); entry.append(footer); evidence.append(entry);
+      }
+      card.append(evidence);
+    }
+    const steps = Array.isArray(result.steps) ? result.steps : [], tools = steps.filter((step) => step.kind === "tool");
+    if (tools.length) {
+      const details = node("details", "research-steps"), summary = node("summary", "", `Research steps · ${plural(tools.length, "data lookup")}`), list = node("ol");
+      const labels = { search_reviews: "Searched stored reviews", get_review: "Read a source review", review_stats: "Checked review statistics", compare_products: "Compared product ratings" };
+      for (const step of steps.slice(0, 32)) {
+        const item = node("li"), heading = node("strong", "", labels[step.name] || String(step.name || step.kind || "Research step").replaceAll("_", " "));
+        item.append(heading); if (step.detail) item.append(node("p", "", step.detail)); list.append(item);
+      }
+      details.append(summary, list); card.append(details);
+    }
+    if (Array.isArray(result.limitations) && result.limitations.length) {
+      const list = node("ul", "research-limitations"); for (const note of [...new Set(result.limitations)]) list.append(node("li", "", note)); card.append(list);
+    }
+    return card;
+  }
+  function renderResearch() {
+    const active = state.automation?.active_job;
+    const researchJob = active?.kind === "research" ? active : null;
+    const activeKey = JSON.stringify([researchJob, state.mutation]);
+    $("research-job").hidden = !researchJob;
+    if (state.researchJobKey !== activeKey) {
+      state.researchJobKey = activeKey;
+      preserveJobFocus($("research-job"), () => $("research-job").replaceChildren(...(researchJob ? [jobCard(researchJob, true)] : [])));
+    }
+    const jobs = (state.automation?.jobs || []).filter((job) => job.kind === "research" && !activeStatuses.has(job.status) && job.options?.dataset === state.dataset && (job.options?.asin || "") === $("research-product").value).slice(0, 5);
+    const key = JSON.stringify([state.dataset, $("research-product").value, jobs]);
+    if (state.researchRenderKey !== key) {
+      state.researchRenderKey = key;
+      $("research-results").replaceChildren(...jobs.map(researchCard));
+    }
+    $("research-empty").hidden = jobs.length > 0;
+    if (!jobs.length) empty($("research-empty"), "Start with something you want to know", "Ask about a count, a rating, or a pattern in your saved reviews. Answers stay linked to the available evidence.", "search");
   }
   async function openEvidence(evidence, dataset, control) {
     if (control.disabled) return;
@@ -805,12 +1069,27 @@
     if (data.stale) {
       const warning = node("div", "report-stale"); warning.append(icon("info"), node("p", "", "Reviews have changed since this report was generated. Run analysis again to update the findings.")); container.append(warning);
     }
+    if (scope.partial) {
+      const warning = node("div", "report-stale"); warning.append(icon("info"), node("p", "", "This report has partial text coverage. Completed chunks are cached. A later broader run can continue the work within its budget.")); container.append(warning);
+    }
+    if (report.pause_reason?.message) {
+      const pause = node("div", "report-stale"), copy = node("div"); copy.append(node("p", "", report.pause_reason.message));
+      if (report.pause_reason.retry_after != null && Number.isFinite(Number(report.pause_reason.retry_after))) copy.append(node("p", "", `Provider guidance: wait at least ${number(Math.ceil(Number(report.pause_reason.retry_after)))} seconds before another run. Retries are manual, with no paid fallback.`));
+      pause.append(icon("clock"), copy); container.append(pause);
+    }
     const intro = node("section", "panel report-intro"), topline = node("div", "report-topline");
     topline.append(node("span", "eyebrow", "SAVED ANALYSIS"), node("span", "badge", report.method_label || report.method || "Analysis"));
+    if (report.method === "openrouter") topline.append(node("span", "badge", report.plan?.depth === "deep" ? "BROADER COVERAGE" : "QUICK SAMPLE"));
+    if (scope.full_coverage === true) topline.append(node("span", "badge", "STORED TEXT COVERED"));
     intro.append(topline, node("h2", "", scope.asin ? `Feedback for ${scope.asin}` : "Your feedback, in perspective"), node("p", "report-summary", report.summary || "No summary was generated."));
     const metadata = node("div", "report-metadata");
     metadata.append(node("span", "", `${plural(scope.analysed_reviews, "review")} analysed of ${number(scope.total_reviews)}`), node("span", "", `Generated ${timeLabel(report.generated_at)}`), node("span", "", scope.dataset === "demo" ? "Fictional demo reviews" : "My workspace"));
     intro.append(metadata);
+    const cachedJob = (state.automation?.jobs || []).find((job) => job.kind === "analysis" && job.options?.dataset === scope.dataset && (job.options?.asin || "") === (scope.asin || "") && job.options?.analysis_method === report.method && (report.method !== "openrouter" || job.options?.depth === report.plan?.depth) && job.result?.analysis_id);
+    if (cachedJob?.result?.cached === true) intro.append(node("p", "cache-reused-note", "The latest run reused this saved report with no model call."));
+    if (scope.processed_segments != null && scope.total_segments != null) intro.append(node("p", "report-scope-note", `${number(scope.processed_segments)} of ${number(scope.total_segments)} text segments processed. The stored collection can still be a limited sample of available reviews.`));
+    const usage = usageSummary(report.usage, report.method === "local" ? "" : report.model, report.usage ? "Report generation usage" : "");
+    if (usage.children.length) intro.append(usage);
     if (Number(scope.excluded_reviews) > 0 || scope.body_truncated) intro.append(node("p", "report-scope-note", `${number(scope.excluded_reviews)} reviews excluded.${scope.body_truncated ? " Some review text was shortened for analysis." : ""} Findings describe the analysed sample.`));
     container.append(intro);
     const ratingSection = node("section", "report-rating-section"), ratingTitle = node("div", "section-title");
@@ -883,10 +1162,13 @@
   document.querySelectorAll("[data-view]").forEach((link) => link.addEventListener("click", (event) => { event.preventDefault(); navigate(link.dataset.view, true); }));
   document.querySelectorAll("[data-go-view]").forEach((control) => control.addEventListener("click", () => navigate(control.dataset.goView, true)));
   document.querySelectorAll("[data-open-import]").forEach((control) => control.addEventListener("click", openImport));
-  document.querySelectorAll("[data-close-dialog]").forEach((control) => control.addEventListener("click", () => { if (!(state.importing && control.dataset.closeDialog === "import-dialog")) $(control.dataset.closeDialog).close(); }));
+  document.querySelectorAll("[data-open-settings]").forEach((control) => control.addEventListener("click", openSettings));
+  document.querySelectorAll("[data-close-dialog]").forEach((control) => control.addEventListener("click", () => { if (!(state.importing && control.dataset.closeDialog === "import-dialog") && !(state.providerSaving && control.dataset.closeDialog === "settings-dialog")) $(control.dataset.closeDialog).close(); }));
   $("import-dialog").addEventListener("cancel", (event) => { if (state.importing) event.preventDefault(); });
-  for (const dialog of [$("review-dialog"), $("import-dialog")]) dialog.addEventListener("click", (event) => {
-    if (event.target !== dialog || (state.importing && dialog.id === "import-dialog")) return;
+  $("settings-dialog").addEventListener("cancel", (event) => { if (state.providerSaving) event.preventDefault(); });
+  $("settings-dialog").addEventListener("close", () => { $("provider-key").value = ""; });
+  for (const dialog of [$("review-dialog"), $("import-dialog"), $("settings-dialog")]) dialog.addEventListener("click", (event) => {
+    if (event.target !== dialog || (state.importing && dialog.id === "import-dialog") || (state.providerSaving && dialog.id === "settings-dialog")) return;
     const rect = dialog.getBoundingClientRect();
     if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
   });
@@ -946,10 +1228,18 @@
   $("automation-retry").addEventListener("click", loadAutomation);
   $("checkpoint-refresh").addEventListener("click", () => loadOverview(true));
   $("analysis-form").addEventListener("submit", startAnalysis);
-  $("analysis-product").addEventListener("change", () => { $("analysis-consent").checked = false; updateWorkflowControls(); loadAnalysis(); });
-  $("analysis-method").addEventListener("change", () => { $("analysis-consent").checked = false; messageAt("analysis-form-error", ""); updateWorkflowControls(); });
+  $("analysis-product").addEventListener("change", () => { $("analysis-consent").checked = false; $("research-consent").checked = false; updateWorkflowControls(); loadAnalysis(); loadAnalysisPlan(); });
+  $("analysis-method").addEventListener("change", () => { $("analysis-consent").checked = false; $("research-consent").checked = false; messageAt("analysis-form-error", ""); updateWorkflowControls(); loadAnalysisPlan(); });
+  $("analysis-depth").addEventListener("change", () => { $("analysis-consent").checked = false; updateWorkflowControls(); loadAnalysisPlan(); });
   $("analysis-consent").addEventListener("change", updateWorkflowControls);
   $("analysis-retry").addEventListener("click", loadAnalysis);
+  $("provider-form").addEventListener("submit", saveProvider);
+  $("provider-clear").addEventListener("click", (event) => saveProvider(event, true));
+  $("provider-zdr").addEventListener("change", () => { state.providerPolicyDirty = true; });
+  $("research-form").addEventListener("submit", startResearch);
+  $("research-product").addEventListener("change", () => { $("research-consent").checked = false; messageAt("research-form-error", ""); updateWorkflowControls(); renderResearch(); });
+  $("research-question").addEventListener("input", () => { $("research-consent").checked = false; messageAt("research-form-error", ""); updateWorkflowControls(); });
+  document.querySelectorAll("[data-question]").forEach((control) => control.addEventListener("click", () => { $("research-question").value = control.dataset.question; $("research-consent").checked = false; updateWorkflowControls(); $("research-question").focus(); }));
   document.addEventListener("visibilitychange", () => { if (document.hidden) clearTimeout(state.pollTimer); else loadAutomation(); });
   window.addEventListener("pagehide", () => { clearTimeout(state.pollTimer); state.automationController?.abort(); });
   $("export-button").title = "Download a spreadsheet-safe CSV"; $("export-button").addEventListener("click", exportCsv);
@@ -965,4 +1255,5 @@
   loadOverview();
   updateWorkflowControls();
   loadAutomation();
+  loadProvider();
 })();

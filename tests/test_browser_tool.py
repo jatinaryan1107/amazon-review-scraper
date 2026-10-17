@@ -237,6 +237,66 @@ class BrowserToolTests(unittest.TestCase):
         self.assertEqual([call[0] for call in self.page.loads], [FIRST, SECOND])
         self.assertEqual(control.clicks, [])
 
+    def test_legacy_entry_404_follows_only_the_product_own_portal_link(self):
+        entry = f"https://www.amazon.in/product-reviews/{ASIN}?reviewerType=all_reviews"
+        portal = f"https://www.amazon.in/portal/customer-reviews/{ASIN}/ref=cm_cr_dp_d_show_all_top?reviewerType=all_reviews"
+        link = FakeControl(portal)
+        self.page.goto_actions = [
+            {"status": 404, "html": "<h1>Not found</h1>"},
+            {"html": "<h1>Fictional product</h1>", "controls": {'a#cm_cr_top_reviews_to_arp_button': [link]}},
+            {"html": review_html(), "controls": {}},
+        ]
+        tool = self.tool(retries=0)
+        snapshot = tool.load(entry)
+        self.assertEqual(snapshot.url, portal)
+        self.assertEqual([call[0] for call in self.page.loads],
+                         [entry, f"https://www.amazon.in/dp/{ASIN}", portal])
+        self.assertEqual(tool.metrics["entry_discovery_pages"], 1)
+        self.assertEqual(link.clicks, [])
+
+    def test_entry_discovery_stops_without_a_valid_product_link(self):
+        entry = f"https://www.amazon.in/product-reviews/{ASIN}?reviewerType=all_reviews"
+        for href in (None, "https://example.com/portal/customer-reviews/B0DEMO0001",
+                     "/portal/customer-reviews/B0DEMO0002", f"/dp/{ASIN}"):
+            with self.subTest(href=href):
+                self.page = FakePage()
+                controls = [FakeControl(href)] if href else []
+                self.page.goto_actions = [{"status": 404}, {"html": "Product", "controls": {
+                    'a#cm_cr_top_reviews_to_arp_button': controls}}]
+                with self.assertRaises((ValueError, browser_tool.PageHTTPError)):
+                    self.tool().load(entry)
+                self.assertEqual(len(self.page.loads), 2)
+
+    def test_entry_discovery_never_changes_transport_after_access_blocks(self):
+        entry = f"https://www.amazon.in/product-reviews/{ASIN}?reviewerType=all_reviews"
+        for status in (403, 429):
+            for at_product in (False, True):
+                with self.subTest(status=status, at_product=at_product):
+                    self.page = FakePage()
+                    self.page.goto_actions = ([{"status": 404}] if at_product else []) + [{"status": status}]
+                    with self.assertRaises(AccessBlockedError):
+                        self.tool().load(entry)
+                    self.assertEqual(len(self.page.loads), 2 if at_product else 1)
+        self.page = FakePage()
+        self.page.goto_actions = [{"status": 404}, {"html": '<input id="ap_email">',
+                                                          "url": "https://www.amazon.in/ap/signin"}]
+        self.assertIn('ap_email', self.tool().load(entry).html)
+        self.assertEqual(len(self.page.loads), 2)
+
+    def test_entry_discovery_is_not_repeated_on_timeout_or_missing_portal(self):
+        entry = f"https://www.amazon.in/product-reviews/{ASIN}?reviewerType=all_reviews"
+        self.page.goto_actions = [{"status": 404}, {"error": FakeTimeout("product timed out")}]
+        with self.assertRaises(FakeTimeout):
+            self.tool(retries=3).load(entry)
+        self.assertEqual(len(self.page.loads), 2)
+        self.page = FakePage()
+        portal = f"https://www.amazon.in/portal/customer-reviews/{ASIN}"
+        self.page.goto_actions = [{"status": 404}, {"html": "Product", "controls": {
+            'a#cm_cr_top_reviews_to_arp_button': [FakeControl(portal)]}}, {"status": 404}]
+        with self.assertRaises(browser_tool.PageHTTPError):
+            self.tool().load(entry)
+        self.assertEqual(len(self.page.loads), 3)
+
     def test_portal_review_pagination_keeps_the_same_product(self):
         portal = f"https://www.amazon.in/portal/customer-reviews/{ASIN}/ref=cm_cr_arp_d_paging_btm_2"
         control = FakeControl(portal, on_click=lambda: setattr(self.page, "url", portal))

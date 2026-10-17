@@ -186,6 +186,10 @@ def collect_product(
         if stopped:
             return stopped
         snapshot = browser.load(cursor_url)
+        # Retain a confirmed redirect as the base for later in-place replay.
+        if (detect_page_state(snapshot.html, snapshot.title)[0] == "success"
+                and extract_asin(snapshot.url) == asin):
+            cursor_url = snapshot.url
         for _ in range(cursor_steps):
             stopped = cancellation()
             if stopped:

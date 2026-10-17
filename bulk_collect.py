@@ -191,7 +191,15 @@ class Campaign:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
+            # Windows readers can briefly hold the destination without sharing deletion.
+            for attempt in range(5):
+                try:
+                    os.replace(temporary, self.path)
+                    break
+                except OSError as exc:
+                    if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 4:
+                        raise
+                    self.sleep(0.05 * 2 ** attempt)
             temporary = None
         finally:
             if temporary is not None:

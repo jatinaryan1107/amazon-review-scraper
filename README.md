@@ -1,6 +1,6 @@
 # Amazon review research project
 
-This project collects product reviews from Amazon India and stores them for research in Reviewdesk. You can start a bounded background collection, resume saved progress, and automatically generate a local report with source reviews. Local analysis is free to run and uses transparent keyword rules and rating statistics. Optional OpenAI analysis requires explicit configuration and consent. **The workflow follows fixed steps; model-directed tool selection is a later milestone.**
+This project collects product reviews from Amazon India and stores them for research in Reviewdesk. You can start a bounded background collection, resume saved progress, and generate reports linked to source reviews. Local analysis uses transparent keyword rules and rating statistics. Optional OpenRouter analysis uses free models, cached batches, and explicit sharing consent. **Ask reviews** adds a bounded agent that can choose local evidence tools when a question needs investigation. The existing optional OpenAI adapter is also available.
 
 ## Start with the offline demonstration
 
@@ -51,6 +51,9 @@ Open [Reviewdesk](http://127.0.0.1:8765) in your browser. Exploring stored revie
 - **Products** compares the products in the dataset and opens their reviews.
 - **Collection** starts background jobs, connects a session, reports progress, and resumes saved positions.
 - **Analysis** creates scoped reports with exact rating statistics, recurring topics, and links to source reviews.
+- **Ask reviews** answers questions about the stored dataset and shows the evidence and tools used.
+
+Use **Settings** to connect an optional OpenRouter key. Saving settings does not make a model request.
 
 The demo workspace contains fictional reviews. Your reviews use `data/reviews.sqlite3`, the same database as the collection command. Importing a CSV keeps duplicate protection and rejects invalid batches without saving partial rows. Demo and personal data stay in separate databases.
 
@@ -92,15 +95,40 @@ Collection uses the existing local API, browser session, and page limits: at mos
 
 The default time budget is 45 minutes, with a maximum of 60. The total new-page budget is at most 1,000; restoring earlier positions can require additional requests. A failed or partial product, an access block, two consecutive batches without new review IDs, or an exhausted budget stops the campaign. Existing failed, partial, or blocked checkpoints require review before another campaign starts. The driver never retries an uncertain job submission. Interrupting it requests cancellation only for its own active job. A restart requires an explicit new invocation.
 
-Progress journals are saved atomically under `data/campaigns/`, which is ignored by Git. These record the selected products, submitted job IDs, distinct counts, and the reason collection stopped. A 5,000-review target does not establish that Amazon will expose 5,000 written reviews. A large rating count is not a written-review count, and a missing Next control does not establish complete coverage.
+Progress journals are saved atomically under `data/campaigns/`, which is ignored by Git. Brief Windows file-sharing locks receive at most five file-replacement attempts over 0.75 seconds. Other file errors fail immediately; job submissions are never retried by this mechanism. Journals record the selected products, submitted job IDs, distinct counts, and the reason collection stopped. A 5,000-review target does not establish that Amazon will expose 5,000 written reviews. A large rating count is not a written-review count, and a missing Next control does not establish complete coverage.
 
-Automatic analysis remains the free local method. The optional OpenAI adapter still analyses a disclosed bounded sample, not all 5,000 review texts. A separate human-reviewed or chat-produced report should state exactly which texts were analysed and preserve source review IDs.
+Automatic analysis remains the free local method. OpenRouter's broader analysis reuses validated chunks across runs and reports its actual text coverage. The optional OpenAI adapter analyses a disclosed bounded sample. A report should state exactly which texts were analysed and preserve source review IDs.
 
 ## What local analysis can tell you
 
 Local analysis calculates averages and rating groups from all stored reviews in the selected scope. Missing ratings remain separate. It scans English keywords for topics such as battery, noise, price, delivery, and support, counts each matching review once per topic, and keeps exact excerpts linked to the original product and review ID. A review may match several topics.
 
 These rules do not understand sarcasm, multilingual text, or context like a language model. A mention of battery life does not establish a battery defect. Star-rating groups describe the review's overall rating, not sentiment about each topic. The interface states the method and sample limits so the results can be checked.
+
+## Optional free OpenRouter analysis
+
+1. Create an API key in [OpenRouter settings](https://openrouter.ai/settings/keys).
+2. In Reviewdesk, open **Settings**, enter the key, and save. Enter it in the local application, not a chat or source file. The key remains in server memory for this process and is cleared when the server exits. Alternatively, set `OPENROUTER_API_KEY` in the server's environment before starting it.
+3. Open **Analysis**, choose OpenRouter and a scope, and inspect the coverage and call estimate. **Quick** uses a bounded sample. **Broader coverage** processes deterministic chunks and reuses completed chunks on subsequent runs.
+4. Allow the selected review text to be sent to OpenRouter, then start the job. Collection's automatic report still runs locally.
+
+The fixed model is [`openrouter/free`](https://openrouter.ai/docs/guides/routing/routers/free-router). It selects an available free model supporting the requested features. The actual model can vary between calls and is recorded with results. The request sets zero price limits and has no paid fallback. If a compatible free model is unavailable, the request stops instead of changing that policy.
+
+OpenRouter currently documents 20 requests per minute and 50 per day for free models on accounts without purchased credits. Purchasing at least $10 in credits raises the documented daily allowance, but Reviewdesk keeps its own conservative 50-attempt daily cap. Failed or uncertain requests can consume quota. The app paces requests, limits each job, and never retries a provider request automatically. Other applications using the same account can reduce the provider allowance independently. Check [current OpenRouter limits](https://openrouter.ai/pricing) before relying on a daily capacity.
+
+Validated analysis chunks and request accounting are stored in `data/analysis.sqlite3`. Keys are never stored there, in job options, in browser storage, or in reports. A cancelled or rate-limited run retains completed chunks; starting the same analysis again can reuse them. A large dataset may need several runs or days. Coverage counts, skipped text, cached chunks, and call usage determine what the report actually examined.
+
+Reviewdesk requests providers that do not collect prompts for training and offers an additional zero data retention requirement. These controls can leave no compatible free route. The app does not silently relax them. They are routing requirements, not a promise about every aspect of provider data handling. Remote response caching and automatic context compression are disabled. See [OpenRouter provider controls](https://openrouter.ai/docs/guides/routing/provider-selection).
+
+## Ask questions about your reviews
+
+Choose a dataset and optional product under **Ask reviews**. Recognized count and rating questions use local calculations with zero model calls. Other questions require a configured OpenRouter key and permission to send the selected evidence.
+
+The agent can request local statistics, search stored reviews, look up evidence, and compare products inside the chosen scope. It has at most four model turns and three tool executions. It cannot control the browser, collect more reviews, access session files, run shell commands, or query arbitrary SQL. The interface shows actual research steps and source quotes, rather than simulated agent activity.
+
+Review text and model output are untrusted. Returned evidence must identify supplied reviews and quote their text exactly. A matching quote supports traceability, but it does not prove that the model's interpretation is correct. Reports distinguish stored product-review rows from distinct review IDs because Amazon can share reviews across variants.
+
+When a shared review ID has conflicting ratings, global AI-report statistics exclude its rating rather than choose one arbitrarily. The ID still counts once as a stored review. Fractional ratings from imports remain visible in the local rating distribution. Conflicting text variants, excerpt limits, and incomplete chunk coverage are disclosed separately.
 
 ## Optional OpenAI analysis
 
@@ -156,6 +184,8 @@ The original fixed two-second sleep has been replaced in the shared runtime by a
 
 Portal review Next controls are clicked in the rendered browser, and collection waits for review text to change. Their reference links are not treated as durable page URLs. Saved positions retain the base page and a bounded number of replay clicks. Hybrid mode returns to the browser when it encounters these controls. A repeated review set still stops collection with partial coverage.
 
+If the exact legacy review entry returns HTTP 404, browser mode opens that product's own page once and inspects its **See more reviews** link. It follows only a validated review-portal link for the same ASIN on HTTPS Amazon.in. A confirmed portal entry becomes the durable replay base. This recovery does not apply to later pagination URLs, login challenges, HTTP 403 or 429, unknown product links, or other server errors. Missing review links remain failures.
+
 Hybrid requests may reduce rendering where server HTML is sufficient, but they are not an official review API or a guaranteed speed improvement. AJAX and portal positions can require replay after a restart. Job metrics include elapsed time, pacing time, HTTP pages, browser pages, fallbacks, and skipped assets. Compare the same product, page limit, and starting position; different review order or access conditions can make comparisons misleading.
 
 A live check on 16 October 2026 used product `B0CGDZC2FK` and a manually saved session. Browser mode processed two distinct pages in 5.58 seconds. Hybrid mode processed the same two pages in 8.64 seconds, needed one browser fallback, and added no duplicate reviews. Browser mode then resumed the saved position and added ten reviews from the third page. The workspace held thirty unique reviews, with local analysis generated automatically. These are individual observations on one product, not a performance benchmark or a guarantee of complete coverage. Browser mode remains the default.
@@ -171,17 +201,13 @@ Other sources were considered:
 
 Primary references: [Creators API resources](https://affiliate-program.amazon.com/creatorsapi/docs/en-us/api-reference), [Customer Feedback API announcement](https://developer-docs.amazon.com/sp-api/docs/sp-api-release-notes), [Amazon Reviews 2023](https://amazon-reviews-2023.github.io/main.html), [Playwright session reuse](https://playwright.dev/python/docs/auth), [shared-cookie requests](https://playwright.dev/python/docs/api/class-apirequestcontext), and [network resource controls](https://playwright.dev/python/docs/network).
 
-## How this becomes an agentic AI project
+## Where agents help
 
-The current workflow collects, stores, analyses, and presents evidence in fixed steps. SQLite provides persistent memory. A later AI agent can choose tools to search stored reviews, request more evidence within limits, and revise a report. Supporting review IDs let a person check each claim. Future evaluation should check evidence quality as well as whether the code ran successfully.
+Collection, storage, exact statistics, and ordinary report batching follow fixed steps. These tasks do not benefit from an agent deciding what to do on every review. SQLite preserves collection progress, jobs, reports, validated analysis chunks, and request accounting.
 
-The planned progression is:
+Ask reviews uses model-directed tool selection when a question needs evidence retrieval. The model chooses from a small read-only toolset; the application validates its arguments, executes the tool, checks the returned evidence, and enforces stopping limits. Recognized statistics questions bypass the model. This keeps agents focused on investigation and avoids a separate model call for every review.
 
-1. **Current:** dependable storage, bounded background collection, resumability, Reviewdesk, local analysis, and optional structured OpenAI reports with validated source quotes.
-2. **Next:** evaluate live collection compatibility and the quality of topic matches and AI interpretations against reviewed examples.
-3. **Later:** one agent that selects tools, checks evidence, and stops within explicit step and spending limits.
-
-Review text remains input data. The optional AI prompt treats it as untrusted evidence, and no tools are exposed to the model. Future agents must preserve that boundary.
+Future evaluation should compare theme quality, unsupported claims, multilingual understanding, and useful evidence against human-reviewed examples. Passing software tests alone does not establish analysis quality.
 
 ## Validation
 
@@ -189,6 +215,6 @@ Review text remains input data. The optional AI prompt treats it as untrusted ev
 python -m unittest discover -s tests -v
 ```
 
-Validation uses local data, fake browser/request adapters, local HTML fixtures, fake provider responses, and a loopback server for the interface API. It checks collection cancellation, access blocks, session persistence, job recovery, schema preservation, report caching, quote validation, and the UI API. It never executes the live `scraper.py` entry point, contacts Amazon, or calls OpenAI. Passing these tests verifies local behavior; live pagination, saved-session validity, provider access, and compatibility with Amazon's current layout require separate intentional checks.
+Validation uses local data, fake browser/request adapters, local HTML fixtures, fake provider responses, and a loopback server for the interface API. It checks collection cancellation, access blocks, session persistence, job recovery, schema preservation, report caching, quote validation, and the UI API. It never executes the live `scraper.py` entry point, contacts Amazon, or calls OpenAI or OpenRouter. Passing these tests verifies local behavior; live pagination, saved-session validity, provider access, and compatibility with Amazon's current layout require separate intentional checks.
 
 GitHub Actions runs the offline suite and a synthetic demo on Linux and Windows with Python 3.10 and 3.13. It does not install Playwright, open a browser, or need account secrets.

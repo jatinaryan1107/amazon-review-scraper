@@ -1,0 +1,279 @@
+"""Evidence, coverage and agent bounds tested with deterministic fake models."""
+
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from analysis_store import AnalysisStore
+from llm_analysis import LLMEngine, can_answer_locally
+from llm_provider import ProviderError, ProviderRegistry
+from review_analysis import AnalysisError, report_fingerprint
+
+
+def review(index=1, **changes):
+    return {"asin": "B0TEST0001", "review_id": f"PRIVATE-ORIGINAL-ID-{index}",
+            "review_title": "Fictional battery review", "review_body": "The battery lasts all evening.",
+            "rating": "4", "reviewer_name": "PRIVATE-AUTHOR", "product_url": "https://www.amazon.in/dp/B0TEST0001", **changes}
+
+
+def response(content=None, tool_calls=None):
+    return {"model": "fictional/model:free", "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0},
+            "choices": [{"finish_reason": "tool_calls" if tool_calls else "stop",
+                         "message": {"content": content, **({"tool_calls": tool_calls} if tool_calls else {})}}]}
+
+
+def report_response(payload):
+    entries = json.loads(payload["messages"][-1]["content"])["reviews"]
+    first = entries[0]
+    quote = (first["body"] or first["title"])[:100]
+    return response(json.dumps({"summary": "A fictional review discusses battery use.",
+        "themes": [{"label": "Battery use", "explanation": "A cited example of battery use.",
+                    "evidence": [{"key": first["key"], "quote": quote}]}], "limitations": ["A test interpretation."]}))
+
+
+class EngineTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).parent)
+        self.addCleanup(self.temp.cleanup)
+        self.now = [1_800_000_000.0]
+        self.store = AnalysisStore(Path(self.temp.name) / "analysis.sqlite3", clock=lambda: self.now[0],
+                                   sleep=lambda seconds: self.now.__setitem__(0, self.now[0] + max(seconds, 0.001)))
+        self.registry = ProviderRegistry(environ={})
+        self.registry.configure({"api_key": "synthetic-test-key"})
+
+    def engine(self, transport=report_response):
+        return LLMEngine(self.registry, self.store, transport=transport)
+
+    def test_quick_report_preserves_fingerprint_and_cache_avoids_second_request(self):
+        sent = []
+        engine = self.engine(lambda payload: sent.append(payload) or report_response(payload))
+        rows = [review()]
+        report = engine.analyse(rows, dataset="workspace", asin="")
+        self.assertEqual(report["fingerprint"], report_fingerprint(rows))
+        self.assertEqual(report["method"], "openrouter")
+        self.assertTrue(report["scope"]["analysis_complete"])
+        self.assertEqual(report["usage"]["calls"], 1)
+        again = engine.analyse(rows, dataset="workspace", asin="")
+        self.assertEqual((again["usage"]["calls"], again["usage"]["cached_chunks"]), (0, 1))
+        self.assertEqual(len(sent), 1)
+        public_payload = json.dumps(sent)
+        for private in ["PRIVATE-ORIGINAL-ID", "PRIVATE-AUTHOR", "https://www.amazon.in", "B0TEST0001"]:
+            self.assertNotIn(private, public_payload)
+        self.assertIn("p000001", public_payload)
+
+    def test_global_duplicate_memberships_and_conflicting_variants_are_disclosed(self):
+        rows = [review(), review(asin="B0TEST0002"), review(asin="B0TEST0003", review_body="A conflicting fictional account with more text.")]
+        report = self.engine().analyse(rows, dataset="workspace", asin="", depth="deep")
+        scope = report["scope"]
+        self.assertEqual((scope["row_count"], scope["memberships"], scope["distinct_reviews"]), (3, 3, 1))
+        self.assertEqual(scope["conflicting_variants"], 1)
+        self.assertGreater(scope["excluded_variant_rows"], 0)
+        self.assertFalse(scope["full_coverage"])
+        self.assertEqual(report["fingerprint"], report_fingerprint(rows))
+
+    def test_deep_segments_preserve_every_character_and_plan_is_read_only(self):
+        rows = [review(review_title="A" * 2500, review_body="B" * 7000)]
+        sent = []
+        engine = self.engine(lambda payload: sent.append(payload) or report_response(payload))
+        before = self.store.path.read_bytes()
+        plan = engine.plan(rows, depth="deep")
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.assertEqual(plan["segmented_reviews"], 1)
+        report = engine.analyse(rows, dataset="workspace", asin="", depth="deep")
+        entries = [entry for payload in sent for entry in json.loads(payload["messages"][-1]["content"])["reviews"]]
+        self.assertEqual("".join(entry["title"] for entry in entries), "A" * 2500)
+        self.assertEqual("".join(entry["body"] for entry in entries), "B" * 7000)
+        self.assertTrue(report["scope"]["full_coverage"])
+        self.assertFalse(report["scope"]["body_truncated"])
+
+    def test_rate_limit_retains_completed_chunks_and_resume_reuses_them(self):
+        rows = [review(index, review_body="Battery " + "x" * 1000) for index in range(80)]
+        calls = []
+        def limited(payload):
+            calls.append(payload)
+            if len(calls) == 2:
+                raise ProviderError("Synthetic free quota pause.", code="rate_limit", retry_after=30)
+            return report_response(payload)
+        engine = self.engine(limited)
+        first = engine.analyse(rows, dataset="workspace", asin="", depth="deep")
+        self.assertTrue(first["scope"]["partial"])
+        self.assertFalse(first["scope"]["analysis_complete"])
+        self.assertEqual(first["pause_reason"]["code"], "rate_limit")
+        second = self.engine().analyse(rows, dataset="workspace", asin="", depth="deep")
+        self.assertTrue(second["scope"]["analysis_complete"])
+        self.assertGreater(second["usage"]["cached_chunks"], 0)
+        self.assertEqual(second["scope"]["analysed_reviews"], 80)
+
+    def test_fabricated_citation_never_enters_the_chunk_cache(self):
+        def fabricated(payload):
+            value = json.loads(report_response(payload)["choices"][0]["message"]["content"])
+            value["themes"][0]["evidence"][0]["quote"] = "This quote does not occur in the supplied source."
+            return response(json.dumps(value))
+        engine = self.engine(fabricated)
+        with self.assertRaises(AnalysisError):
+            engine.analyse([review()], dataset="workspace", asin="")
+        self.assertEqual(engine.plan([review()])["chunks_cached"], 0)
+        self.assertEqual(self.store.daily_remaining(), 49)
+
+    def test_local_exact_questions_need_no_credentials_or_provider_requests(self):
+        self.registry.configure({"clear": True})
+        def forbidden(payload):
+            raise AssertionError("A local statistics question must not call a model")
+        engine = self.engine(forbidden)
+        result = engine.ask([review(), review(2, rating="")], "How many reviews are stored?", dataset="workspace", asin="")
+        self.assertEqual(result["method"], "local")
+        self.assertIn("2 distinct", result["answer"])
+        self.assertEqual(result["usage"]["calls"], 0)
+        self.assertEqual(self.store.daily_remaining(), 50)
+        self.assertTrue(can_answer_locally("What is the average rating?"))
+        self.assertTrue(can_answer_locally("  HOW many reviews are in this selection?!  "))
+        self.assertFalse(can_answer_locally("How many reviews complain about battery quality?"))
+        for filtered in ["How many one star reviews?", "How many reviews with a 1 star rating?",
+                         "What is the average rating for product B0TEST0001?",
+                         "Count reviews without a rating", "Average rating distribution",
+                         "How many reviews are not in this selection?"]:
+            with self.subTest(question=filtered):
+                self.assertFalse(can_answer_locally(filtered))
+
+    def test_deep_call_budget_pauses_and_resumes_without_repeating_cached_requests(self):
+        rows = [review(index, review_body="Battery " + "x" * 24000) for index in range(32)]
+        engine = self.engine()
+        plan = engine.plan(rows, depth="deep")
+        self.assertGreater(plan["chunks_total"], 30)
+        self.assertLessEqual(plan["chunks_total"], 50)
+        first = engine.analyse(rows, dataset="workspace", asin="", depth="deep")
+        self.assertEqual(first["usage"]["calls"], 30)
+        self.assertEqual(first["pause_reason"]["code"], "call_budget")
+        self.assertTrue(first["scope"]["partial"])
+        self.assertFalse(first["scope"]["analysis_complete"])
+        second = engine.analyse(rows, dataset="workspace", asin="", depth="deep")
+        self.assertEqual(second["usage"]["cached_chunks"], 30)
+        self.assertEqual(second["usage"]["calls"], plan["chunks_total"] - 30)
+        self.assertEqual(second["scope"]["analysed_reviews"], 32)
+        self.assertTrue(second["scope"]["full_coverage"])
+
+    def test_cache_provenance_and_privacy_policy_are_revalidated(self):
+        engine = self.engine()
+        engine.analyse([review()], dataset="workspace", asin="")
+        canonical, _, _, _ = engine._prepare([review()], "workspace", "")
+        chunks, _, _, _ = engine._manifest(canonical, "quick")
+        key = engine._chunk_key(chunks[0], "quick")
+        value = self.store.get_chunk(key)
+        value["model"] = "invalid model with private text"
+        self.store.put_chunk(key, value)
+        self.assertEqual(engine.plan([review()])["chunks_cached"], 0)
+        engine.analyse([review()], dataset="workspace", asin="")
+        previous = engine.cache_discriminator()
+        self.registry.configure({"require_zdr": True})
+        self.assertNotEqual(previous, engine.cache_discriminator())
+        self.assertEqual(engine.plan([review()])["chunks_cached"], 0)
+
+    def test_agent_uses_read_only_tool_then_validates_only_exposed_evidence(self):
+        calls = []
+        def agent(payload):
+            calls.append(payload)
+            if len(calls) == 1:
+                return response(tool_calls=[{"id": "test-call", "type": "function", "function": {
+                    "name": "search_reviews", "arguments": json.dumps({"query": "battery", "rating": "all", "limit": 2})}}])
+            tool = json.loads(payload["messages"][-1]["content"])["reviews"][0]
+            return response(json.dumps({"answer": "The cited review describes battery life.",
+                "evidence": [{"key": tool["key"], "quote": "The battery lasts all evening."}], "limitations": ["Only one retrieved example."]}))
+        result = self.engine(agent).ask([review()], "What do reviews say about battery life?", dataset="workspace", asin="")
+        self.assertEqual(result["evidence"][0]["review_id"], review()["review_id"])
+        self.assertEqual(result["usage"]["calls"], 2)
+        self.assertEqual([step["name"] for step in result["steps"] if step["kind"] == "tool"], ["search_reviews"])
+        self.assertNotIn("PRIVATE-ORIGINAL-ID", json.dumps(calls))
+        self.assertNotIn("B0TEST0001", json.dumps(calls))
+
+    def test_agent_rejects_unknown_tools_repeated_calls_and_unseen_citations(self):
+        for name, args in [("run_sql", {"sql": "DELETE FROM reviews"}),
+                           ("search_reviews", {"query": "battery", "rating": "all", "limit": 500})]:
+            with self.subTest(name=name):
+                transport = lambda payload: response(tool_calls=[{"id": "test", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}])
+                with self.assertRaises(AnalysisError):
+                    self.engine(transport).ask([review()], "Explain battery comments", dataset="workspace", asin="")
+        def unseen(payload):
+            return response(json.dumps({"answer": "A claim without retrieval.", "evidence": [{"key": "r000001", "quote": "The battery lasts all evening."}], "limitations": []}))
+        with self.assertRaises(AnalysisError):
+            self.engine(unseen).ask([review()], "Explain battery comments", dataset="workspace", asin="")
+        sent = []
+        def repeated(payload):
+            sent.append(payload)
+            return response(tool_calls=[{"id": str(len(sent)), "type": "function", "function": {
+                "name": "get_stats", "arguments": "{}"}}])
+        with self.assertRaisesRegex(AnalysisError, "repeated"):
+            self.engine(repeated).ask([review()], "Explain battery comments", dataset="workspace", asin="")
+        self.assertEqual(len(sent), 2)
+
+    def test_agent_json_errors_are_safe_and_retrieval_truncation_is_explicit(self):
+        for arguments in [None, "PRIVATE-MALFORMED-MODEL-TEXT"]:
+            def malformed(payload):
+                if arguments is None:
+                    return response("PRIVATE-MALFORMED-MODEL-TEXT")
+                return response(tool_calls=[{"id": "bad-json", "type": "function", "function": {
+                    "name": "get_stats", "arguments": arguments}}])
+            with self.subTest(arguments=arguments), self.assertRaises(AnalysisError) as caught:
+                self.engine(malformed).ask([review()], "Explain battery comments", dataset="workspace", asin="")
+            self.assertNotIn("PRIVATE-MALFORMED", str(caught.exception))
+        sent = []
+        def detail(payload):
+            sent.append(payload)
+            if len(sent) == 1:
+                return response(tool_calls=[{"id": "detail", "type": "function", "function": {
+                    "name": "get_review", "arguments": '{"key":"r000001"}'}}])
+            tool = json.loads(payload["messages"][-1]["content"])
+            self.assertEqual(len(tool["body"]), 4000)
+            self.assertTrue(tool["body_truncated"])
+            return response(json.dumps({"answer": "A retrieved excerpt contains battery text.",
+                "evidence": [{"key": tool["key"], "quote": "Battery"}], "limitations": []}))
+        result = self.engine(detail).ask([review(review_body="Battery " + "x" * 6000)], "Explain battery comments", dataset="workspace", asin="")
+        self.assertEqual(result["scope"]["retrieved_truncated_reviews"], 1)
+        self.assertEqual(result["scope"]["detail_body_limit"], 4000)
+
+    def test_fractional_ratings_and_conflicting_shared_ratings_are_not_silently_counted(self):
+        rows = [review(rating="1"), review(asin="B0TEST0002", rating="5"),
+                review(2, rating="3.5"), review(3, rating="")]
+        engine = self.engine(lambda payload: self.fail("Local statistics must not call a provider"))
+        result = engine.ask(rows, "What is the average rating?", dataset="workspace", asin="")
+        self.assertIn("3.50 across 1 rated", result["answer"])
+        self.assertEqual(result["scope"]["rating_conflicts"], 1)
+        self.assertTrue(any("conflicting" in text for text in result["limitations"]))
+        counts = engine.ask(rows, "Rating distribution", dataset="workspace", asin="")
+        self.assertIn("3.5 stars: 1", counts["answer"])
+        self.assertIn("Unrated or conflicting: 2", counts["answer"])
+
+    def test_agent_product_mapping_and_centered_search_remain_within_fixed_scope(self):
+        rows = [review(review_body="x" * 2500 + " battery concern " + "y" * 2500)]
+        sent = []
+        def agent(payload):
+            sent.append(payload)
+            if len(sent) == 1:
+                name, arguments = "get_stats", {}
+            elif len(sent) == 2:
+                products = json.loads(payload["messages"][-1]["content"])["products"]
+                self.assertEqual(products, [{"product": "p000001", "asin": "B0TEST0001"}])
+                name, arguments = "search_reviews", {"query": "battery concern", "rating": "all", "limit": 1}
+            else:
+                item = json.loads(payload["messages"][-1]["content"])["reviews"][0]
+                self.assertLessEqual(len(item["body"]), 600)
+                self.assertIn("battery concern", item["body"])
+                return response(json.dumps({"answer": "The retrieved excerpt describes a battery concern.",
+                    "evidence": [{"key": item["key"], "quote": "battery concern"}], "limitations": []}))
+            return response(tool_calls=[{"id": str(len(sent)), "type": "function", "function": {
+                "name": name, "arguments": json.dumps(arguments)}}])
+        result = self.engine(agent).ask(rows, "Investigate this product's battery concern.", dataset="workspace", asin="B0TEST0001")
+        self.assertEqual(result["usage"]["calls"], 3)
+        self.assertEqual(result["evidence"][0]["quote"], "battery concern")
+        for private in ("PRIVATE-AUTHOR", "PRIVATE-ORIGINAL-ID", "https://www.amazon.in"):
+            self.assertNotIn(private, json.dumps(sent))
+
+    def test_validated_chunk_explanations_and_limits_reach_merged_report(self):
+        rows = [review(index, review_body="Battery " + "x" * 1000) for index in range(40)]
+        report = self.engine().analyse(rows, dataset="workspace", asin="", depth="deep")
+        self.assertIn("A cited example of battery use.", report["themes"][0]["explanation"])
+        self.assertTrue(any("A test interpretation." in item for item in report["limitations"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -14,6 +14,7 @@ from dashboard_data import DashboardData
 from job_manager import AutomationService, JobConflict, TERMINAL
 from review_analysis import AnalysisError, analyse_reviews
 from review_store import ReviewStore
+from llm_provider import ProviderError, ProviderRegistry
 
 
 def review(index=1, **changes):
@@ -27,6 +28,48 @@ def collection_result(status="completed", **changes):
     return {"status": status, "inserted": 1, "pages_processed": 1,
             "products": [{"asin": "B0TEST0001", "status": "complete", "inserted": 1, "pages_processed": 1}],
             "metrics": {"browser_pages": 1, "http_pages": 0}, **changes}
+
+
+class FakeLLM:
+    def __init__(self):
+        self.calls = []
+        self.partial_once = False
+        self.failure = None
+        self.entered = self.release = None
+
+    def cache_discriminator(self, depth="quick"):
+        return f"openrouter:{depth}:v1:test-policy"
+
+    def plan(self, rows, *, dataset, asin, depth="quick"):
+        return {"depth": depth, "total_reviews": len(rows), "calls_needed": 1 if rows else 0,
+                "provider": "openrouter", "model": "openrouter/free", "free_only": True}
+
+    def analyse(self, rows, *, dataset, asin, depth, cancelled, on_progress):
+        self.calls.append(("analysis", depth))
+        if self.failure:
+            raise self.failure
+        if self.entered:
+            self.entered.set()
+            self.release.wait(3)
+        on_progress({"chunks_done": 1, "chunks_total": 2, "calls": 1, "private_key": "must-not-be-saved"})
+        report = analyse_reviews(rows, dataset=dataset, asin=asin)
+        complete = not self.partial_once
+        self.partial_once = False
+        report.update(method="openrouter", method_label="Free AI analysis", model="openrouter/free", usage={"calls": 1})
+        report["scope"].update(analysis_complete=complete, full_coverage=complete and depth == "deep")
+        return report
+
+    def ask(self, rows, question, *, dataset, asin, cancelled, on_progress):
+        self.calls.append(("research", question))
+        if self.failure:
+            raise self.failure
+        if self.entered:
+            self.entered.set()
+            self.release.wait(3)
+        return {"question": question, "answer": "A checked test answer.", "evidence": [],
+                "limitations": [], "scope": {"total_reviews": len(rows)}, "usage": {"calls": 0},
+                "steps": [{"kind": "local", "name": "get_stats"}], "method": "local", "model": "",
+                "fingerprint": "test", "api_key": "must-not-be-saved"}
 
 
 class JobManagerTests(unittest.TestCase):
@@ -51,7 +94,8 @@ class JobManagerTests(unittest.TestCase):
         folder = folder or self.folder / "data"
         data = DashboardData(folder)
         defaults = {"settings": lambda: {"configured": False, "model": ""},
-                    "session_reader": lambda path: {"exists": path.exists(), "valid": path.exists(), "detail": "Synthetic test session."}}
+                    "session_reader": lambda path: {"exists": path.exists(), "valid": path.exists(), "detail": "Synthetic test session."},
+                    "provider_registry": ProviderRegistry(environ={})}
         defaults.update(options)
         service = AutomationService(data, self.folder / "synthetic-auth.json", **defaults)
         self.services.append(service)
@@ -519,6 +563,183 @@ class JobManagerTests(unittest.TestCase):
         service.close()
         with self.assertRaises(JobConflict):
             service.submit({"kind": "auth"})
+
+    def router_service(self, *, configured=True, engine=None, **options):
+        registry = ProviderRegistry(environ={})
+        if configured:
+            registry.configure({"api_key": "synthetic-session-key"})
+        return self.service(provider_registry=registry, llm_engine=engine or FakeLLM(), **options)
+
+    def test_provider_metadata_configuration_and_privacy_never_persist_a_key(self):
+        service = self.router_service(configured=False, autostart=False)
+        self.assertFalse(service.provider_metadata()["configured"])
+        metadata = service.configure_provider({"api_key": "synthetic-private-key", "require_zdr": True})
+        self.assertTrue(metadata["configured"])
+        self.assertTrue(metadata["require_zdr"])
+        self.assertEqual(metadata["key_source"], "session")
+        self.assertNotIn("private-key", json.dumps(metadata))
+        self.assertFalse(service.configure_provider({"require_zdr": False})["require_zdr"])
+        self.assertFalse(service.configure_provider({"clear": True})["configured"])
+        self.assertNotIn(b"synthetic-private-key", service.path.read_bytes())
+        for payload in [{}, {"api_key": ""}, {"api_key": "x", "clear": True}, {"clear": 1},
+                        {"require_zdr": "yes"}, {"api_key": "line\nbreak"}, {"model": "paid-model"}]:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                service.configure_provider(payload)
+
+    def test_router_requires_sharing_configuration_and_valid_depth(self):
+        service = self.router_service(autostart=False)
+        for payload in [{"kind": "analysis", "analysis_method": "openrouter"},
+                        {"kind": "analysis", "analysis_method": "openrouter", "allow_external": True, "depth": "all"},
+                        {"kind": "analysis", "depth": "quick"},
+                        self.collection_payload(analysis_method="openrouter", allow_external=True)]:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                service.submit(payload)
+        other = self.router_service(folder=self.folder / "unconfigured", configured=False, autostart=False)
+        with self.assertRaisesRegex(ValueError, "Configure"):
+            other.submit({"kind": "analysis", "analysis_method": "openrouter", "allow_external": True})
+
+    def test_router_cache_separates_depth_and_reuses_only_completed_reports(self):
+        engine = FakeLLM()
+        service = self.router_service(engine=engine)
+        self.seed(service)
+        base = {"kind": "analysis", "analysis_method": "openrouter", "allow_external": True}
+        for depth in ("quick", "deep", "quick", "deep"):
+            job = service.submit({**base, "depth": depth})
+            finished = self.wait_job(service, job["id"])
+            self.assertEqual(finished["status"], "succeeded", finished)
+        self.assertEqual(engine.calls, [("analysis", "quick"), ("analysis", "deep")])
+        latest = service.latest_report("workspace")["report"]
+        self.assertEqual(latest["method"], "openrouter")
+        self.assertNotIn("must-not-be-saved", json.dumps(service.get_job(job["id"])))
+        self.assertEqual(service.get_job(job["id"])["result"]["cached"], True)
+
+    def test_partial_deep_report_is_saved_honestly_and_never_reused_as_complete(self):
+        engine = FakeLLM()
+        engine.partial_once = True
+        service = self.router_service(engine=engine)
+        self.seed(service)
+        payload = {"kind": "analysis", "analysis_method": "openrouter", "allow_external": True, "depth": "deep"}
+        first = service.submit(payload)
+        first = self.wait_job(service, first["id"])
+        self.assertEqual(first["status"], "paused")
+        self.assertTrue(first["result"]["partial"])
+        self.assertFalse(service.latest_report("workspace")["report"]["scope"]["analysis_complete"])
+        second = service.submit(payload)
+        second = self.wait_job(service, second["id"])
+        self.assertEqual(second["status"], "succeeded")
+        self.assertFalse(second["result"]["cached"])
+        self.assertEqual(len(engine.calls), 2)
+
+    def test_completed_deep_report_can_disclose_variant_gaps_without_pausing_forever(self):
+        engine = FakeLLM()
+        analyse = engine.analyse
+        def conflicting_report(*args, **kwargs):
+            report = analyse(*args, **kwargs)
+            report["scope"].update(analysis_complete=True, partial=False, full_coverage=False, conflicting_variants=1)
+            return report
+        engine.analyse = conflicting_report
+        service = self.router_service(engine=engine)
+        self.seed(service)
+        payload = {"kind": "analysis", "analysis_method": "openrouter", "allow_external": True, "depth": "deep"}
+        for _ in range(2):
+            job = service.submit(payload)
+            finished = self.wait_job(service, job["id"])
+            self.assertEqual(finished["status"], "succeeded")
+        self.assertEqual(len(engine.calls), 1)
+        self.assertFalse(service.latest_report("workspace")["report"]["scope"]["full_coverage"])
+
+    def test_partial_provider_pause_exposes_the_safe_reason_and_retry_hint(self):
+        engine = FakeLLM()
+        analyse = engine.analyse
+        def paused_report(*args, **kwargs):
+            report = analyse(*args, **kwargs)
+            report["scope"].update(analysis_complete=False, partial=True)
+            report["pause_reason"] = {"code": "rate_limit", "retry_after": 11.2, "message": "RAW-REQUEST-SECRET"}
+            return report
+        engine.analyse = paused_report
+        service = self.router_service(engine=engine)
+        self.seed(service)
+        job = service.submit({"kind": "analysis", "analysis_method": "openrouter", "allow_external": True})
+        finished = self.wait_job(service, job["id"])
+        self.assertEqual(finished["status"], "paused")
+        self.assertEqual(finished["result"]["error_code"], "rate_limit")
+        self.assertEqual(finished["result"]["retry_after"], 12)
+        self.assertNotIn("RAW-REQUEST-SECRET", finished["detail"])
+        self.assertNotIn("RAW-REQUEST-SECRET", json.dumps(service.latest_report("workspace")))
+
+    def test_local_research_needs_no_provider_or_consent_and_stays_out_of_reports(self):
+        engine = FakeLLM()
+        service = self.router_service(configured=False, engine=engine)
+        self.seed(service)
+        job = service.submit({"kind": "research", "question": "How many reviews are stored?"})
+        finished = self.wait_job(service, job["id"])
+        self.assertEqual(finished["status"], "succeeded", finished)
+        self.assertEqual(finished["result"]["method"], "local")
+        self.assertNotIn("api_key", finished["result"])
+        self.assertNotIn("must-not-be-saved", json.dumps(finished))
+        self.assertIsNone(service.latest_report("workspace")["report"])
+        with self.assertRaisesRegex(ValueError, "Configure"):
+            service.submit({"kind": "research", "question": "What battery complaints recur?"})
+        with self.assertRaisesRegex(ValueError, "Configure"):
+            service.submit({"kind": "research", "question": "What battery complaints recur?", "allow_external": True})
+
+    def test_research_options_and_answer_size_are_bounded(self):
+        engine = FakeLLM()
+        service = self.router_service(engine=engine, autostart=False)
+        for payload in [{"question": ""}, {"question": "q" * 1501}, {"question": []},
+                        {"question": "How many reviews?", "dataset": []},
+                        {"question": "How many reviews?", "allow_external": 1}]:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                service.submit({"kind": "research", **payload})
+        engine.ask = Mock(return_value={"answer": "a" * 16001, "evidence": [], "steps": []})
+        job = service.submit({"kind": "research", "question": "How many reviews?"})
+        with self.assertRaises(ValueError):
+            service._run(job)
+        self.assertIsNone(service.get_job(job["id"])["result"])
+
+    def test_provider_errors_expose_only_safe_codes_and_bounded_retry_hints(self):
+        engine = FakeLLM()
+        engine.failure = ProviderError("RAW-REQUEST-SECRET", code="rate_limit", retry_after=3.2)
+        service = self.router_service(engine=engine)
+        self.seed(service)
+        with self.assertLogs("job_manager", level="ERROR") as logs:
+            job = service.submit({"kind": "analysis", "analysis_method": "openrouter", "allow_external": True})
+            finished = self.wait_job(service, job["id"])
+        self.assertEqual(finished["status"], "failed")
+        self.assertEqual(finished["result"], {"error_code": "rate_limit", "retry_after": 4})
+        self.assertNotIn("RAW-REQUEST-SECRET", json.dumps(finished) + " ".join(logs.output))
+        engine.failure = RuntimeError("Authorization: Bearer RAW-REQUEST-SECRET")
+        with self.assertLogs("job_manager", level="ERROR") as logs:
+            job = service.submit({"kind": "research", "question": "What battery complaints recur?", "allow_external": True})
+            finished = self.wait_job(service, job["id"])
+        self.assertEqual(finished["result"]["error_code"], "provider_error")
+        self.assertNotIn("RAW-REQUEST-SECRET", json.dumps(finished) + " ".join(logs.output))
+
+    def test_running_router_cancellation_preserves_chunks_but_saves_no_report(self):
+        engine = FakeLLM()
+        engine.entered, engine.release = threading.Event(), threading.Event()
+        self.addCleanup(engine.release.set)
+        service = self.router_service(engine=engine)
+        self.seed(service)
+        job = service.submit({"kind": "analysis", "analysis_method": "openrouter", "allow_external": True})
+        self.assertTrue(engine.entered.wait(3))
+        with self.assertRaises(JobConflict):
+            service.configure_provider({"clear": True})
+        service.cancel(job["id"])
+        engine.release.set()
+        finished = self.wait_job(service, job["id"])
+        self.assertEqual(finished["status"], "cancelled")
+        self.assertIsNone(service.latest_report("workspace")["report"])
+
+    def test_plan_is_local_and_does_not_mutate_databases_or_require_a_key(self):
+        engine = FakeLLM()
+        service = self.router_service(configured=False, engine=engine, autostart=False)
+        self.seed(service)
+        before = service.path.read_bytes(), service.data.path("workspace").read_bytes()
+        planned = service.analysis_plan("workspace", "", "deep")
+        self.assertEqual((planned["depth"], planned["total_reviews"]), ("deep", 1))
+        self.assertEqual(engine.calls, [])
+        self.assertEqual((service.path.read_bytes(), service.data.path("workspace").read_bytes()), before)
 
 
 if __name__ == "__main__":

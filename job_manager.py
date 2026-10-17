@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import importlib.util
 import json
 import logging
+import math
 from pathlib import Path
 import sqlite3
 import threading
@@ -14,11 +15,42 @@ import uuid
 
 from dashboard_data import DashboardData, REVIEW_COLUMNS
 from review_parser import extract_asin
+from llm_provider import ProviderError
 
 
 ACTIVE = ("queued", "running", "cancelling")
 TERMINAL = ("succeeded", "paused", "blocked", "failed", "cancelled", "interrupted")
 LOG = logging.getLogger(__name__)
+PROVIDER_MESSAGES = {
+    "configuration": "Check the OpenRouter settings and try again.",
+    "environment_key": "OpenRouter is configured by the server environment. Change its key there.",
+    "not_configured": "Add an OpenRouter key in Settings before using AI.",
+    "invalid_request": "The AI request could not be accepted. Check the selected scope and settings.",
+    "authorization": "OpenRouter could not authorize this request. Check the configured key.",
+    "rate_limit": "The free provider rate limit was reached. Try again later.",
+    "unavailable": "A free model is unavailable with the current privacy settings. Try again later.",
+    "budget": "The analysis call budget was reached. Completed chunks are saved.",
+    "connection": "The provider request could not be completed. Inspect the job before trying again.",
+    "invalid_response": "The provider returned a response that could not be validated.",
+    "incomplete": "The provider did not finish its response. Completed chunks are saved.",
+    "refusal": "The model declined this request. Local analysis remains available.",
+    "daily_limit": "The daily free request limit was reached. Try again after the limit resets.",
+    "cost_guard": "The provider reported a charge. Further AI requests are disabled for this server session.",
+    "call_budget": "The per-job AI call budget was reached. Completed chunks are saved.",
+}
+
+
+def provider_failure(error):
+    """Expose bounded provider diagnostics without exception or request content."""
+    code = getattr(error, "code", "provider_error")
+    if not isinstance(code, str) or code not in PROVIDER_MESSAGES:
+        code = "provider_error"
+    result = {"error_code": code}
+    retry = getattr(error, "retry_after", None)
+    if (not isinstance(retry, bool) and isinstance(retry, (int, float))
+            and math.isfinite(retry) and 0 <= retry <= 86400):
+        result["retry_after"] = math.ceil(retry)
+    return PROVIDER_MESSAGES.get(code, "AI analysis could not finish. Completed chunks are retained."), result
 
 
 def now() -> str:
@@ -64,7 +96,8 @@ class AutomationService:
 
     def __init__(self, data: DashboardData, auth_file: Path, *, collection_runner=None,
                  auth_runner=None, local_analyser=None, ai_analyser=None,
-                 settings=None, session_reader=None, autostart=True):
+                 settings=None, session_reader=None, autostart=True,
+                 provider_registry=None, llm_engine=None):
         self.data = data
         self.auth_file = Path(auth_file)
         self.path = data.data_dir / "jobs.sqlite3"
@@ -83,8 +116,15 @@ class AutomationService:
         self._settings = settings
         self._session_reader = session_reader
         self._thread = None
+        self._provider_registry = provider_registry
+        self._llm_engine = llm_engine
+        self._analysis_store = None
+        self._provider_mutex = threading.RLock()
         try:
             self._initialize()
+            if llm_engine is None:
+                from analysis_store import AnalysisStore
+                self._analysis_store = AnalysisStore(data.data_dir / "analysis.sqlite3")
             if autostart:
                 self._thread = threading.Thread(target=self._worker, name="reviewdesk-worker", daemon=True)
                 self._thread.start()
@@ -176,6 +216,71 @@ class AutomationService:
         from review_analysis import provider_settings
         return provider_settings()
 
+    def _registry(self):
+        with self._provider_mutex:
+            if self._provider_registry is None:
+                from llm_provider import ProviderRegistry
+                self._provider_registry = ProviderRegistry()
+            return self._provider_registry
+
+    def provider_metadata(self):
+        public = self._registry().public()
+        source = public.get("key_source", "none")
+        return {"provider": "openrouter", "configured": public.get("configured") is True,
+                "key_source": source if isinstance(source, str) and source in {"environment", "session", "none"} else "none",
+                "model": "openrouter/free", "free_only": True, "privacy": "deny_training",
+                "daily_limit": 50, "require_zdr": public.get("require_zdr") is True,
+                "disabled": public.get("disabled") is True}
+
+    def configure_provider(self, payload):
+        if not isinstance(payload, dict) or not payload or set(payload) - {"api_key", "clear", "require_zdr"}:
+            raise ValueError("Supply an OpenRouter key, clear the session key, or change the privacy setting.")
+        if "require_zdr" in payload and not isinstance(payload["require_zdr"], bool):
+            raise ValueError("The zero data retention setting must be true or false.")
+        if "clear" in payload and payload["clear"] is not True:
+            raise ValueError("Clear must be true to forget the session key.")
+        if "api_key" in payload:
+            key = payload["api_key"]
+            if (not isinstance(key, str) or not key.strip() or len(key) > 4096
+                    or any(ord(character) < 32 or ord(character) == 127 for character in key)):
+                raise ValueError("Supply a nonempty API key without control characters.")
+            if "clear" in payload:
+                raise ValueError("Choose either saving a key or clearing it.")
+        with self._mutex:
+            with self._connection() as connection:
+                active = self._decode(connection.execute(
+                    "SELECT * FROM jobs WHERE status IN ('queued','running','cancelling') LIMIT 1"
+                ).fetchone())
+            if active and (active["kind"] == "research" or active["options"].get("analysis_method") == "openrouter"):
+                raise JobConflict("Stop the active AI job before changing its provider settings.")
+            try:
+                self._registry().configure(payload)
+                return self.provider_metadata()
+            except ProviderError:
+                raise
+            except Exception:
+                raise ValueError("Provider settings could not be updated. Check the settings and try again.") from None
+
+    def _engine(self):
+        with self._provider_mutex:
+            if self._llm_engine is None:
+                from llm_analysis import LLMEngine
+                self._llm_engine = LLMEngine(self._registry(), self._analysis_store)
+            return self._llm_engine
+
+    @staticmethod
+    def _scope(dataset, asin):
+        if not isinstance(dataset, str) or dataset not in {"demo", "workspace"} or not isinstance(asin, str):
+            raise ValueError("Choose a valid dataset and product scope.")
+        if asin and extract_asin(f"https://www.amazon.in/dp/{asin}") != asin:
+            raise ValueError("Choose a valid product ASIN.")
+
+    def analysis_plan(self, dataset="workspace", asin="", depth="quick"):
+        self._scope(dataset, asin)
+        if not isinstance(depth, str) or depth not in {"quick", "deep"}:
+            raise ValueError("Choose quick or deep analysis.")
+        return self._engine().plan(self._rows(dataset, asin), dataset=dataset, asin=asin, depth=depth)
+
     def status(self):
         from collection_runtime import session_status
         reader = self._session_reader or session_status
@@ -197,6 +302,7 @@ class AutomationService:
                      < (last_collection["updated_at"], last_collection["sequence"]))):
             auth_status = "blocked"
         settings = self.provider_settings()
+        router = self.provider_metadata()
         try:
             installed = importlib.util.find_spec("playwright") is not None
         except (ValueError, ImportError):
@@ -205,7 +311,8 @@ class AutomationService:
             "auth": {"status": auth_status, "detail": session.get("detail", "Session validity is checked during collection."),
                      "busy": bool(active and active["kind"] == "auth"), "verified": False},
             "capabilities": {"playwright_installed": installed, "openai_configured": settings.get("configured", False),
-                             "model": settings.get("model", "")},
+                             "model": settings.get("model", ""), "openrouter_configured": router["configured"],
+                             "openrouter_model": router["model"], "openrouter_disabled": router["disabled"], "free_only": True},
             "jobs": jobs, "active_job": active,
         }
 
@@ -215,7 +322,8 @@ class AutomationService:
         kind = payload.get("kind")
         allowed = {
             "collection": {"kind", "urls", "max_pages", "resume", "transport", "analyse", "analysis_method", "allow_external"},
-            "analysis": {"kind", "dataset", "asin", "analysis_method", "allow_external"},
+            "analysis": {"kind", "dataset", "asin", "analysis_method", "allow_external", "depth"},
+            "research": {"kind", "dataset", "asin", "question", "allow_external"},
             "auth": {"kind"},
         }
         if not isinstance(kind, str) or kind not in allowed or set(payload) - allowed[kind]:
@@ -223,11 +331,32 @@ class AutomationService:
         if kind == "auth":
             return kind, {}
         method = payload.get("analysis_method", "local")
-        if not isinstance(method, str) or method not in {"local", "openai"}:
-            raise ValueError("Choose local analysis or optional OpenAI analysis.")
+        if not isinstance(method, str) or method not in {"local", "openai", "openrouter"}:
+            raise ValueError("Choose local analysis or a supported optional AI provider.")
         external = payload.get("allow_external", False)
         if not isinstance(external, bool):
             raise ValueError("External analysis consent must be true or false.")
+        if kind == "research":
+            from llm_analysis import can_answer_locally
+            dataset, asin, question = payload.get("dataset", "workspace"), payload.get("asin", ""), payload.get("question")
+            self._scope(dataset, asin)
+            if not isinstance(question, str) or not question.strip() or len(question) > 1500:
+                raise ValueError("Ask a nonempty question with at most 1,500 characters.")
+            if not can_answer_locally(question.strip()):
+                if not self.provider_metadata()["configured"]:
+                    raise ValueError("Configure OpenRouter in Settings before asking this question.")
+                if not external:
+                    raise ValueError("Confirm that the selected review text may be sent to OpenRouter.")
+            return kind, {"dataset": dataset, "asin": asin, "question": question.strip(), "allow_external": external}
+        if method == "openrouter":
+            if kind != "analysis":
+                raise ValueError("Automatic collection reports use local analysis. Choose AI separately in Analysis.")
+            if not self.provider_metadata()["configured"]:
+                raise ValueError("Configure OpenRouter in Settings before using AI analysis.")
+            if not external:
+                raise ValueError("Confirm that the selected review text may be sent to OpenRouter.")
+        if "depth" in payload and method != "openrouter":
+            raise ValueError("Analysis depth applies only to OpenRouter analysis.")
         if method == "openai":
             if kind == "collection":
                 raise ValueError("Automatic collection reports use local analysis. Choose OpenAI separately in Analysis.")
@@ -237,11 +366,14 @@ class AutomationService:
                 raise ValueError("Optional OpenAI analysis needs OPENAI_API_KEY and OPENAI_MODEL in the server environment.")
         if kind == "analysis":
             dataset, asin = payload.get("dataset", "workspace"), payload.get("asin", "")
-            if not isinstance(dataset, str) or dataset not in {"demo", "workspace"} or not isinstance(asin, str):
-                raise ValueError("Choose a valid dataset and product scope.")
-            if asin and extract_asin(f"https://www.amazon.in/dp/{asin}") != asin:
-                raise ValueError("Choose a valid product ASIN.")
-            return kind, {"dataset": dataset, "asin": asin, "analysis_method": method, "allow_external": external}
+            self._scope(dataset, asin)
+            options = {"dataset": dataset, "asin": asin, "analysis_method": method, "allow_external": external}
+            if method == "openrouter":
+                depth = payload.get("depth", "quick")
+                if not isinstance(depth, str) or depth not in {"quick", "deep"}:
+                    raise ValueError("Choose quick or deep analysis.")
+                options["depth"] = depth
+            return kind, options
         urls = payload.get("urls")
         if not isinstance(urls, list) or not 1 <= len(urls) <= 10:
             raise ValueError("Add between one and ten Amazon India product URLs.")
@@ -335,34 +467,90 @@ class AutomationService:
         current = report_fingerprint(self._rows(dataset, asin), dataset=dataset, asin=asin)
         return {"report": report, "stale": current != row["fingerprint"]}
 
-    def _analyse(self, job_id, dataset, asin, method):
+    def _llm_progress(self, job_id, phase):
+        progress = dict(self.get_job(job_id)["progress"])
+        def update(event):
+            if not isinstance(event, dict):
+                return
+            for key, value in event.items():
+                if (isinstance(key, str) and len(key) <= 48 and key.replace("_", "").isalnum()
+                        and not isinstance(value, bool) and isinstance(value, (int, float))
+                        and math.isfinite(value) and 0 <= value <= 10**12):
+                    progress[key] = value
+            self._update(job_id, phase=phase, progress=progress,
+                         detail="Inspecting review evidence." if phase == "researching" else "Analyzing saved review chunks.")
+        return update
+
+    @staticmethod
+    def _router_report_complete(report, depth):
+        scope = report.get("scope", {})
+        return scope.get("analysis_complete") is True and scope.get("partial") is not True
+
+    def _analyse(self, job_id, dataset, asin, method, depth="quick"):
         from review_analysis import analyse_reviews, analyse_with_openai, report_fingerprint
         rows = self._rows(dataset, asin)
         if not rows:
             raise ValueError("There are no reviews in this scope yet. Collect or import reviews first.")
         fingerprint = report_fingerprint(rows, dataset=dataset, asin=asin)
         settings = self.provider_settings()
-        model = settings.get("model", "") if method == "openai" else ""
+        model = settings.get("model", "") if method == "openai" else "openrouter/free" if method == "openrouter" else ""
+        cache_method = self._engine().cache_discriminator(depth) if method == "openrouter" else method
         with self._connection() as connection:
-            cached = connection.execute(
-                "SELECT id FROM reports WHERE dataset=? AND asin=? AND method=? AND fingerprint=? AND model=? "
-                "ORDER BY created_at DESC, id DESC LIMIT 1", (dataset, asin, method, fingerprint, model)).fetchone()
+            matches = connection.execute(
+                "SELECT id,report FROM reports WHERE dataset=? AND asin=? AND method=? AND fingerprint=? AND model=? "
+                "ORDER BY created_at DESC, id DESC", (dataset, asin, cache_method, fingerprint, model)).fetchall()
+        cached = next((row for row in matches if method != "openrouter" or
+                       self._router_report_complete(json.loads(row["report"]), depth)), None)
         if cached:
             with self._connection() as connection:
                 connection.execute("UPDATE reports SET created_at=? WHERE id=?", (now(), cached["id"]))
             return cached["id"], True
-        self._update(job_id, phase="analysing", detail="Analyzing stored review evidence." if method == "local" else "Analyzing the bounded review sample with OpenAI.")
+        self._update(job_id, phase="analysing", detail="Analyzing stored review evidence." if method == "local" else "Analyzing selected review evidence with AI.")
         if method == "local":
             report = (self._local_analyser or analyse_reviews)(rows, dataset=dataset, asin=asin)
+        elif method == "openrouter":
+            report = self._engine().analyse(rows, dataset=dataset, asin=asin, depth=depth,
+                                            cancelled=self._cancel.is_set,
+                                            on_progress=self._llm_progress(job_id, "analysing"))
         else:
             report = (self._ai_analyser or analyse_with_openai)(rows, dataset=dataset, asin=asin, model=model, cancelled=self._cancel.is_set)
         if self._cancel.is_set() or self._shutdown.is_set():
             return None, False
+        if method == "openrouter" and isinstance(report.get("pause_reason"), dict):
+            pause = report["pause_reason"]
+            message, diagnostics = provider_failure(ProviderError("Analysis paused.", code=pause.get("code"), retry_after=pause.get("retry_after")))
+            report["pause_reason"] = {"code": diagnostics["error_code"], "message": message,
+                                      "retry_after": diagnostics.get("retry_after")}
         report_id = uuid.uuid4().hex
         with self._connection() as connection:
             connection.execute("INSERT INTO reports VALUES (?,?,?,?,?,?,?,?)", (
-                report_id, dataset, asin, method, fingerprint, model, json.dumps(report, ensure_ascii=False), now()))
+                report_id, dataset, asin, cache_method, fingerprint, model, json.dumps(report, ensure_ascii=False, allow_nan=False), now()))
         return report_id, False
+
+    def _research(self, job_id, options):
+        from llm_analysis import can_answer_locally
+        if not can_answer_locally(options["question"]) and not options["allow_external"]:
+            raise ValueError("Confirm review sharing before asking an AI question.")
+        self._update(job_id, phase="researching", detail="Inspecting saved review evidence.")
+        answer = self._engine().ask(self._rows(options["dataset"], options["asin"]), options["question"],
+                                    dataset=options["dataset"], asin=options["asin"],
+                                    cancelled=self._cancel.is_set,
+                                    on_progress=self._llm_progress(job_id, "researching"))
+        if self._cancel.is_set() or self._shutdown.is_set():
+            self._update(job_id, status="cancelled", phase="finished", detail="Research stopped. Saved analysis chunks are retained.")
+            return
+        fields = {"question", "answer", "evidence", "limitations", "scope", "usage", "steps", "method", "model", "fingerprint"}
+        if not isinstance(answer, dict):
+            raise ValueError("Research did not return a valid answer.")
+        result = {key: value for key, value in answer.items() if key in fields}
+        if (not isinstance(result.get("answer"), str) or len(result["answer"]) > 16000
+                or not isinstance(result.get("evidence"), list) or len(result["evidence"]) > 32
+                or not isinstance(result.get("steps"), list) or len(result["steps"]) > 16
+                or len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 131072):
+            raise ValueError("Research exceeded its answer limits. No answer was saved.")
+        result["question"] = options["question"]
+        self._update(job_id, status="succeeded", phase="finished", result=result,
+                     detail="The answer is ready. Open its source reviews to check the evidence.")
 
     def _run(self, job):
         job_id, options = job["id"], job["options"]
@@ -382,11 +570,30 @@ class AutomationService:
                          detail=result.get("detail", "Session saved. Its validity is checked during collection."))
             return
         if kind == "analysis":
-            report_id, cached = self._analyse(job_id, options["dataset"], options["asin"], options["analysis_method"])
+            depth = options.get("depth", "quick")
+            report_id, cached = self._analyse(job_id, options["dataset"], options["asin"], options["analysis_method"], depth)
             cancelled = self._cancel.is_set()
-            self._update(job_id, status="cancelled" if cancelled else "succeeded", phase="finished",
-                         result={"analysis_id": report_id, "cached": cached},
-                         detail="Analysis stopped." if cancelled else ("The saved report is still current. Reused it without a provider call." if cached else "Analysis is ready. Open Analysis to inspect its evidence."))
+            partial = False
+            if report_id and options["analysis_method"] == "openrouter":
+                with self._connection() as connection:
+                    report = json.loads(connection.execute("SELECT report FROM reports WHERE id=?", (report_id,)).fetchone()[0])
+                partial = not self._router_report_complete(report, depth)
+            detail = "Analysis stopped." if cancelled else (
+                "Analysis paused with completed chunks saved. Start another job to continue." if partial else
+                "The saved report is still current. Reused it without a provider call." if cached else
+                "Analysis is ready. Open Analysis to inspect its evidence.")
+            result = {"analysis_id": report_id, "cached": cached}
+            if options["analysis_method"] == "openrouter":
+                result["partial"] = partial
+                if partial and isinstance(report.get("pause_reason"), dict):
+                    pause = report["pause_reason"]
+                    detail, diagnostics = provider_failure(ProviderError("Analysis paused.", code=pause.get("code"), retry_after=pause.get("retry_after")))
+                    result.update(diagnostics)
+            self._update(job_id, status="cancelled" if cancelled else "paused" if partial else "succeeded", phase="finished",
+                         result=result, detail=detail)
+            return
+        if kind == "research":
+            self._research(job_id, options)
             return
         from collection_runtime import run_collection
         runner = self._collection_runner or run_collection
@@ -452,10 +659,21 @@ class AutomationService:
                 try:
                     self._run(job)
                 except Exception as exc:
-                    LOG.exception("Local job %s failed", job["id"])
-                    detail = str(exc) if isinstance(exc, (ValueError, ImportError)) else "The local job failed. Check the server terminal for details."
-                    self._update(job["id"], status="cancelled" if self._cancel.is_set() else "failed", phase="finished",
-                                 detail=detail, error=detail)
+                    provider_job = job["kind"] == "research" or (job["kind"] == "analysis" and job["options"].get("analysis_method") in {"openai", "openrouter"})
+                    if provider_job:
+                        detail, result = provider_failure(exc)
+                        if job["options"].get("analysis_method") == "openai" and not isinstance(exc, ProviderError):
+                            detail = str(exc) if isinstance(exc, (ValueError, ImportError)) else "The local job failed. Check the server terminal for details."
+                        LOG.error("Provider job %s failed (%s)", job["id"], result["error_code"])
+                        cancelled = self._cancel.is_set() or self._shutdown.is_set()
+                        self._update(job["id"], status="cancelled" if cancelled else "failed", phase="finished",
+                                     detail="Analysis stopped. Saved chunks are retained." if cancelled else detail,
+                                     error=None if cancelled else detail, result=result)
+                    else:
+                        LOG.exception("Local job %s failed", job["id"])
+                        detail = str(exc) if isinstance(exc, (ValueError, ImportError)) else "The local job failed. Check the server terminal for details."
+                        self._update(job["id"], status="cancelled" if self._cancel.is_set() else "failed", phase="finished",
+                                     detail=detail, error=detail)
                 finally:
                     with self._mutex:
                         self._active_id = None
@@ -470,3 +688,5 @@ class AutomationService:
             self._thread.join(timeout=2)
         else:
             self._worker_lock.close()
+        if self._analysis_store is not None:
+            self._analysis_store.close()

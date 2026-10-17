@@ -254,6 +254,7 @@ class PlaywrightBrowser:
         self._asin = asin
         self._next, self._next_url = None, None
         self._blocked_status = None
+        discovery_used = False
         for attempt in range(self.retries + 1):
             self._pause()
             try:
@@ -269,6 +270,11 @@ class PlaywrightBrowser:
                     if block is not None:
                         return block
                     self._next, self._next_url = None, None
+                    parsed = urlsplit(url)
+                    if (response.status == 404 and parsed.path == f"/product-reviews/{asin}"
+                            and parsed.query == "reviewerType=all_reviews"):
+                        discovery_used = True
+                        return self._discover_review_entry()
                     raise PageHTTPError(response.status)
                 self._wait_for_content()
                 self._raise_access_block()
@@ -282,10 +288,41 @@ class PlaywrightBrowser:
                 block = self._access_block()
                 if block is not None:
                     return block
-                if attempt == self.retries:
+                if discovery_used or attempt == self.retries:
                     raise
                 self._sleep(2 ** attempt)
         raise RuntimeError("Navigation attempts exhausted")
+
+    def _discover_review_entry(self):
+        """Follow the product's own review link after a legacy entry returns 404."""
+        self._pause()
+        response = self.page.goto(f"https://www.amazon.in/dp/{self._asin}",
+                                  wait_until="domcontentloaded", timeout=self.timeout_ms)
+        self._raise_access_block()
+        if response is not None and response.status in {403, 429}:
+            raise AccessBlockedError(response.status)
+        block = self._access_block()
+        if block is not None:
+            return block
+        self._validate_location("unknown")
+        if response is not None and response.status >= 400:
+            raise PageHTTPError(response.status)
+        self.metrics["entry_discovery_pages"] = self.metrics.get("entry_discovery_pages", 0) + 1
+        candidates = self.page.locator('a#cm_cr_top_reviews_to_arp_button')
+        for index in range(min(candidates.count(), 10)):
+            link = candidates.nth(index)
+            if not link.is_visible() or not link.is_enabled():
+                continue
+            href = link.get_attribute("href")
+            if not href:
+                continue
+            destination = urljoin(self.page.url, href)
+            if (extract_asin(destination) != self._asin
+                    or not PORTAL_REVIEW_PATH.fullmatch(urlsplit(destination).path)):
+                raise _navigation_error("Product review link is outside the expected review portal.",
+                                        destination, "unknown", self._asin)
+            return self.load(destination)
+        raise PageHTTPError(404)
 
     def advance(self):
         """Follow a validated direct link or click one in-place control once."""

@@ -12,7 +12,7 @@ import sys
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from dashboard_data import MAX_IMPORT_BYTES, DashboardData, ReviewQuery
-from job_manager import AutomationService, JobConflict
+from job_manager import AutomationService, JobConflict, ProviderError, provider_failure
 from review_parser import extract_asin
 
 
@@ -118,6 +118,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     raise ValueError("Automation status does not accept filters.")
                 self.json_response(200, self.server.automation.status())
                 return
+            if path == "/api/provider":
+                if parsed.query:
+                    raise ValueError("Provider settings do not accept query filters.")
+                self.json_response(200, self.server.automation.provider_metadata())
+                return
+            if path == "/api/analysis/plan":
+                params = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=3)
+                if set(params) - {"dataset", "asin", "depth"} or any(len(value) != 1 for value in params.values()):
+                    raise ValueError("Choose one dataset, product scope, and analysis depth.")
+                self.json_response(200, self.server.automation.analysis_plan(
+                    params.get("dataset", ["workspace"])[0], params.get("asin", [""])[0], params.get("depth", ["quick"])[0]))
+                return
             if path in {"/api/analysis", "/api/review"}:
                 params = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
                 allowed = {"dataset", "asin", "review_id"} if path == "/api/review" else {"dataset", "asin"}
@@ -149,6 +161,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             else:
                 self.respond(200, self.server.data.export(query), "text/csv; charset=utf-8",
                              {"Content-Disposition": f'attachment; filename="reviewdesk-{query.dataset}.csv"'})
+        except ProviderError as exc:
+            self.provider_error(exc)
         except ValueError as exc:
             database_error = self.is_database_error(exc)
             if database_error:
@@ -157,6 +171,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (OSError, sqlite3.Error) as exc:
             self.log_error("Local dashboard data could not be read: %s", exc)
             self.json_response(500, {"error": "The local review data could not be read. Check the server terminal."})
+        except Exception as exc:
+            self.log_error("Local dashboard request failed (%s)", type(exc).__name__)
+            self.json_response(500, {"error": "This local request could not be completed."})
+
+    def provider_error(self, error):
+        message, diagnostics = provider_failure(error)
+        code = diagnostics["error_code"]
+        status = 429 if code in {"rate_limit", "daily_limit"} else 503 if code in {"unavailable", "connection"} else 400
+        self.json_response(status, {"error": message, "code": code,
+                                   **({"retry_after": diagnostics["retry_after"]} if "retry_after" in diagnostics else {})})
 
     @staticmethod
     def is_database_error(error: ValueError) -> bool:
@@ -167,6 +191,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         try:
             parsed = urlsplit(self.path)
+            if not parsed.scheme and not parsed.netloc and parsed.path == "/api/provider":
+                if parsed.query:
+                    raise ValueError("Provider settings do not accept query filters.")
+                accepted, payload = self.read_action_json()
+                if accepted:
+                    self.json_response(200, self.server.automation.configure_provider(payload))
+                return
             if not parsed.scheme and not parsed.netloc and (parsed.path == "/api/jobs" or parsed.path.startswith("/api/jobs/")):
                 if parsed.query:
                     raise ValueError("Job actions do not accept query filters.")
@@ -208,6 +239,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.json_response(409, {"error": str(exc)})
         except LookupError as exc:
             self.json_response(404, {"error": str(exc)})
+        except ProviderError as exc:
+            self.provider_error(exc)
         except ValueError as exc:
             status = 500 if self.is_database_error(exc) else 400
             if status == 500:
@@ -216,14 +249,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (OSError, sqlite3.Error) as exc:
             self.log_error("Local CSV import could not be saved: %s", exc)
             self.json_response(500, {"error": "The CSV could not be saved. Check the server terminal."})
+        except Exception as exc:
+            self.log_error("Local dashboard action failed (%s)", type(exc).__name__)
+            self.json_response(500, {"error": "This local action could not be completed."})
 
-    def post_job(self, path):
+    def read_action_json(self):
         if self.headers.get_all("X-Reviewdesk-Request", []) != ["1"]:
             self.json_response(403, {"error": "Start jobs from the local Reviewdesk page."})
-            return
+            return False, None
         if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
             self.json_response(415, {"error": "Job actions require a JSON request."})
-            return
+            return False, None
         lengths = self.headers.get_all("Content-Length", [])
         if self.headers.get_all("Transfer-Encoding") or len(lengths) != 1:
             raise ValueError("The job request must include one body size.")
@@ -233,7 +269,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             length = -1
         if not 0 < length <= 16_384:
             self.json_response(413 if length > 16_384 else 400, {"error": "Supply a nonempty JSON object no larger than 16 KiB."})
-            return
+            return False, None
         raw = self.rfile.read(length)
         if len(raw) != length:
             raise ValueError("The job request was incomplete.")
@@ -241,7 +277,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             result = {}
             for key, value in pairs:
                 if key in result:
-                    raise ValueError("Each job option can be supplied only once.")
+                    raise ValueError("Each option can be supplied only once.")
                 result[key] = value
             return result
         def invalid_constant(value):
@@ -250,6 +286,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             payload = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=invalid_constant)
         except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
             raise ValueError("The job request is not valid UTF-8 JSON.") from exc
+        return True, payload
+
+    def post_job(self, path):
+        accepted, payload = self.read_action_json()
+        if not accepted:
+            return
         if path == "/api/jobs":
             self.json_response(202, {"job": self.server.automation.submit(payload)})
             return

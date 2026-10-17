@@ -2,12 +2,13 @@
 
 import http.client
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import DEFAULT, Mock, patch
 
 from bulk_collect import Campaign, CampaignError, Limits, LocalAPI, database_progress, load_manifest, validate_manifest
 from review_store import ReviewStore
@@ -281,6 +282,62 @@ assert not {'scraper', 'collection_runtime', 'job_manager', 'playwright'}.inters
 """
         result = subprocess.run([sys.executable, "-c", script], cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_journal_retries_only_transient_windows_locks(self):
+        campaign = self.campaign(FakeAPI())
+        for code in (5, 32, 33):
+            locked = PermissionError("File is temporarily locked")
+            locked.winerror = code
+            with patch("bulk_collect.os.replace", wraps=os.replace, side_effect=[locked, locked, DEFAULT]) as replace:
+                campaign.save()
+            self.assertEqual(replace.call_count, 3)
+            self.assertEqual(json.loads(campaign.path.read_text(encoding="utf-8"))["phase"], "starting")
+        self.assertEqual(self.clock.sleeps, [0.05, 0.1] * 3)
+
+    def test_journal_permanent_lock_is_bounded_and_cleans_temporary_file(self):
+        campaign = self.campaign(FakeAPI())
+        campaign.save()
+        before = campaign.path.read_bytes()
+        locked = PermissionError("File is temporarily locked")
+        locked.winerror = 5
+        campaign.state["phase"] = "changed"
+        with patch("bulk_collect.os.replace", side_effect=locked) as replace:
+            with self.assertRaises(PermissionError):
+                campaign.save()
+        self.assertEqual(replace.call_count, 5)
+        self.assertEqual(self.clock.sleeps, [0.05, 0.1, 0.2, 0.4])
+        self.assertEqual(campaign.path.read_bytes(), before)
+        self.assertEqual(list(campaign.path.parent.glob(".campaign-*.tmp")), [])
+
+    def test_journal_does_not_retry_other_file_errors(self):
+        campaign = self.campaign(FakeAPI())
+        for failure in (PermissionError("Denied"), OSError("Disk full")):
+            with patch("bulk_collect.os.replace", side_effect=failure) as replace:
+                with self.assertRaises(OSError):
+                    campaign.save()
+            self.assertEqual(replace.call_count, 1)
+        self.assertEqual(self.clock.sleeps, [])
+        self.assertEqual(list(campaign.path.parent.glob(".campaign-*.tmp")), [])
+
+    def test_journal_lock_after_submission_cancels_only_its_known_job(self):
+        api = FakeAPI([plan(1, polls=10)])
+        campaign = self.campaign(api)
+        locked = PermissionError("File is temporarily locked")
+        locked.winerror = 32
+        original_save = campaign.save
+
+        def save():
+            if campaign.active_id:
+                with patch("bulk_collect.os.replace", side_effect=locked):
+                    return original_save()
+            return original_save()
+
+        with patch.object(campaign, "save", side_effect=save):
+            with self.assertRaises(PermissionError):
+                campaign.run()
+        self.assertEqual(api.cancels, [api.jobs[0]["id"]])
+        self.assertEqual(len(api.posts), 1)
+        self.assertEqual(list(campaign.path.parent.glob(".campaign-*.tmp")), [])
 
     def test_local_api_has_fixed_loopback_host_headers_and_no_redirect_retry(self):
         connection = Mock()

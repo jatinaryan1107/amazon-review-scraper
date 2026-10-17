@@ -112,6 +112,20 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(browser.advances, 2)
         self.assertEqual(self.store.summary()["total_reviews"], 3)
 
+    def test_discovered_portal_entry_becomes_the_durable_replay_base(self):
+        portal = f"https://www.amazon.in/portal/customer-reviews/{ASIN}/ref=cm_cr_dp_d_show_all_top?reviewerType=all_reviews"
+        first = PageSnapshot(portal, html(), has_next=True)
+        report = collect_product(FakeBrowser([first]), self.store, PRODUCT, max_pages=1)
+        self.assertEqual(report["status"], "paused")
+        checkpoint = self.store.get_checkpoint(ASIN)
+        self.assertEqual((checkpoint["next_url"], checkpoint["replay_steps"]), (portal, 1))
+        second = PageSnapshot(portal, html("DEMO-R2"))
+        browser = FakeBrowser([first, second])
+        resumed = collect_product(browser, self.store, PRODUCT, max_pages=1, resume=True)
+        self.assertEqual(browser.loads, [portal])
+        self.assertEqual(resumed["inserted"], 1)
+        self.assertEqual(resumed["status"], "complete")
+
     def test_ajax_resume_replays_then_processes_saved_position(self):
         initial = PageSnapshot(FIRST, html(), has_next=True)
         collect_product(FakeBrowser([initial]), self.store, PRODUCT, max_pages=1)
