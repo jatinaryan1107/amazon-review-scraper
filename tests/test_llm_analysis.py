@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from analysis_store import AnalysisStore
 from llm_analysis import LLMEngine, can_answer_locally
@@ -26,10 +27,10 @@ def response(content=None, tool_calls=None):
 def report_response(payload):
     entries = json.loads(payload["messages"][-1]["content"])["reviews"]
     first = entries[0]
-    quote = (first["body"] or first["title"])[:100]
+    passage = next(iter(first["body"] or first["title"]))
     return response(json.dumps({"summary": "A fictional review discusses battery use.",
         "themes": [{"label": "Battery use", "explanation": "A cited example of battery use.",
-                    "evidence": [{"key": first["key"], "quote": quote}]}], "limitations": ["A test interpretation."]}))
+                    "evidence": [passage]}], "limitations": ["A test interpretation."]}))
 
 
 class EngineTests(unittest.TestCase):
@@ -62,6 +63,37 @@ class EngineTests(unittest.TestCase):
             self.assertNotIn(private, public_payload)
         self.assertIn("p000001", public_payload)
 
+    def test_passage_selection_preserves_original_unicode_quotes(self):
+        text = "Battery's great 👍.\nHindi: बैटरी अच्छी है.  Keep both spaces."
+        result = self.engine().analyse([review(review_body=text)], dataset="workspace", asin="")
+        quote = result["themes"][0]["evidence"][0]["quote"]
+        self.assertEqual(quote, text)
+
+    def test_unknown_or_duplicate_passages_are_rejected_without_caching(self):
+        for mode in ["unknown", "duplicate", "same_review"]:
+            def invalid(payload):
+                entry = json.loads(payload["messages"][-1]["content"])["reviews"][0]
+                ids = [*entry["title"], *entry["body"]]
+                evidence = ["unavailable"] if mode == "unknown" else [ids[0], ids[0] if mode == "duplicate" else ids[1]]
+                value = json.loads(report_response(payload)["choices"][0]["message"]["content"])
+                value["themes"][0]["evidence"] = evidence
+                return response(json.dumps(value))
+            with self.subTest(mode=mode), self.assertRaises(ProviderError) as caught:
+                self.engine(invalid).analyse([review()], dataset="workspace", asin="")
+            self.assertEqual(caught.exception.code, "evidence_reference")
+            self.assertEqual(self.engine().plan([review()])["chunks_cached"], 0)
+
+    def test_tampered_cached_quote_is_rejected_even_after_passage_resolution(self):
+        engine = self.engine()
+        engine.analyse([review()], dataset="workspace", asin="")
+        canonical, _, _, _ = engine._prepare([review()], "workspace", "")
+        chunks, _, _, _ = engine._manifest(canonical, "quick")
+        key = engine._chunk_key(chunks[0], "quick")
+        cached = self.store.get_chunk(key)
+        cached["result"]["themes"][0]["evidence"][0]["quote"] = "A fabricated cached quote."
+        self.store.put_chunk(key, cached)
+        self.assertEqual(engine.plan([review()])["chunks_cached"], 0)
+
     def test_global_duplicate_memberships_and_conflicting_variants_are_disclosed(self):
         rows = [review(), review(asin="B0TEST0002"), review(asin="B0TEST0003", review_body="A conflicting fictional account with more text.")]
         report = self.engine().analyse(rows, dataset="workspace", asin="", depth="deep")
@@ -82,11 +114,29 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(plan["segmented_reviews"], 1)
         report = engine.analyse(rows, dataset="workspace", asin="", depth="deep")
         entries = [entry for payload in sent for entry in json.loads(payload["messages"][-1]["content"])["reviews"]]
-        self.assertEqual("".join(entry["title"] for entry in entries), "A" * 2500)
-        self.assertEqual("".join(entry["body"] for entry in entries), "B" * 7000)
+        self.assertEqual("".join(text for entry in entries for text in entry["title"].values()), "A" * 2500)
+        self.assertEqual("".join(text for entry in entries for text in entry["body"].values()), "B" * 7000)
         self.assertTrue(report["scope"]["full_coverage"])
         self.assertFalse(report["scope"]["body_truncated"])
 
+    def test_larger_batches_reduce_calls_and_bound_encoded_unicode_requests(self):
+        rows = [review(index, review_body="बैटरी 👍\\\n" * 600) for index in range(40)]
+        sent = []
+        self.registry.configure({"require_zdr": True})
+        engine = self.engine(lambda payload: sent.append(payload) or report_response(payload))
+        efficient = engine.plan(rows, depth="deep")
+        with patch("llm_analysis.MAX_BATCH_BYTES", 24_000):
+            small = engine.plan(rows, depth="deep")
+        self.assertLess(efficient["calls_needed"], small["calls_needed"])
+        report = engine.analyse(rows, dataset="workspace", asin="", depth="deep")
+        self.assertTrue(report["scope"]["full_coverage"])
+        self.assertEqual(report["scope"]["analysed_reviews"], 40)
+        self.assertEqual(len(sent), efficient["calls_needed"])
+        for payload in sent:
+            self.assertLessEqual(len(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
+                                 efficient["batch_request_byte_limit"])
+
+    @patch("llm_analysis.MAX_BATCH_BYTES", 24_000)
     def test_rate_limit_retains_completed_chunks_and_resume_reuses_them(self):
         rows = [review(index, review_body="Battery " + "x" * 1000) for index in range(80)]
         calls = []
@@ -108,7 +158,7 @@ class EngineTests(unittest.TestCase):
     def test_fabricated_citation_never_enters_the_chunk_cache(self):
         def fabricated(payload):
             value = json.loads(report_response(payload)["choices"][0]["message"]["content"])
-            value["themes"][0]["evidence"][0]["quote"] = "This quote does not occur in the supplied source."
+            value["themes"][0]["evidence"][0] = {"key": "e1", "quote": "This quote does not occur in the supplied source."}
             return response(json.dumps(value))
         engine = self.engine(fabricated)
         with self.assertRaises(AnalysisError):
@@ -133,15 +183,13 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, "invalid_json")
 
     def test_report_validation_exposes_safe_specific_reasons_without_raw_output(self):
-        for expected in ["report_format", "evidence_reference", "evidence_quote"]:
+        for expected in ["report_format", "evidence_reference"]:
             def invalid(payload):
                 value = json.loads(report_response(payload)["choices"][0]["message"]["content"])
                 if expected == "report_format":
                     value["unexpected"] = "PRIVATE-MODEL-OUTPUT"
                 elif expected == "evidence_reference":
-                    value["themes"][0]["evidence"][0]["key"] = "PRIVATE-MODEL-OUTPUT"
-                else:
-                    value["themes"][0]["evidence"][0]["quote"] = "PRIVATE-MODEL-OUTPUT"
+                    value["themes"][0]["evidence"][0] = "PRIVATE-MODEL-OUTPUT"
                 return response(json.dumps(value))
             with self.subTest(expected=expected), self.assertRaises(ProviderError) as caught:
                 self.engine(invalid).analyse([review()], dataset="workspace", asin="")
@@ -196,6 +244,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(engine.plan([review()])["chunks_cached"], 0)
         self.assertEqual(self.store.daily_remaining(), 49)
 
+    @patch("llm_analysis.MAX_BATCH_BYTES", 24_000)
     def test_deep_call_budget_pauses_and_resumes_without_repeating_cached_requests(self):
         rows = [review(index, review_body="Battery " + "x" * 24000) for index in range(32)]
         engine = self.engine()
@@ -238,10 +287,13 @@ class EngineTests(unittest.TestCase):
                     "name": "search_reviews", "arguments": json.dumps({"query": "battery", "rating": "all", "limit": 2})}}])
             tool = json.loads(payload["messages"][-1]["content"])["reviews"][0]
             return response(json.dumps({"answer": "The cited review describes battery life.",
-                "evidence": [{"key": tool["key"], "quote": "The battery lasts all evening."}], "limitations": ["Only one retrieved example."]}))
+                "evidence": [next(iter(tool["body"]))], "limitations": ["Only one retrieved example."]}))
         result = self.engine(agent).ask([review()], "What do reviews say about battery life?", dataset="workspace", asin="")
         self.assertEqual(result["evidence"][0]["review_id"], review()["review_id"])
         self.assertEqual(result["usage"]["calls"], 2)
+        self.assertEqual(calls[0]["tool_choice"], "required")
+        self.assertNotIn("response_format", calls[0])
+        self.assertEqual(result["evidence"][0]["quote"], "The battery lasts all evening.")
         self.assertEqual([step["name"] for step in result["steps"] if step["kind"] == "tool"], ["search_reviews"])
         self.assertNotIn("PRIVATE-ORIGINAL-ID", json.dumps(calls))
         self.assertNotIn("B0TEST0001", json.dumps(calls))
@@ -283,10 +335,10 @@ class EngineTests(unittest.TestCase):
                 return response(tool_calls=[{"id": "detail", "type": "function", "function": {
                     "name": "get_review", "arguments": '{"key":"r000001"}'}}])
             tool = json.loads(payload["messages"][-1]["content"])
-            self.assertEqual(len(tool["body"]), 4000)
+            self.assertEqual(sum(map(len, tool["body"].values())), 4000)
             self.assertTrue(tool["body_truncated"])
             return response(json.dumps({"answer": "A retrieved excerpt contains battery text.",
-                "evidence": [{"key": tool["key"], "quote": "Battery"}], "limitations": []}))
+                "evidence": [next(iter(tool["body"]))], "limitations": []}))
         result = self.engine(detail).ask([review(review_body="Battery " + "x" * 6000)], "Explain battery comments", dataset="workspace", asin="")
         self.assertEqual(result["scope"]["retrieved_truncated_reviews"], 1)
         self.assertEqual(result["scope"]["detail_body_limit"], 4000)
@@ -316,18 +368,19 @@ class EngineTests(unittest.TestCase):
                 name, arguments = "search_reviews", {"query": "battery concern", "rating": "all", "limit": 1}
             else:
                 item = json.loads(payload["messages"][-1]["content"])["reviews"][0]
-                self.assertLessEqual(len(item["body"]), 600)
-                self.assertIn("battery concern", item["body"])
+                self.assertLessEqual(sum(map(len, item["body"].values())), 600)
+                self.assertIn("battery concern", "".join(item["body"].values()))
                 return response(json.dumps({"answer": "The retrieved excerpt describes a battery concern.",
-                    "evidence": [{"key": item["key"], "quote": "battery concern"}], "limitations": []}))
+                    "evidence": [next(key for key, text in item["body"].items() if "battery concern" in text)], "limitations": []}))
             return response(tool_calls=[{"id": str(len(sent)), "type": "function", "function": {
                 "name": name, "arguments": json.dumps(arguments)}}])
         result = self.engine(agent).ask(rows, "Investigate this product's battery concern.", dataset="workspace", asin="B0TEST0001")
         self.assertEqual(result["usage"]["calls"], 3)
-        self.assertEqual(result["evidence"][0]["quote"], "battery concern")
+        self.assertIn("battery concern", result["evidence"][0]["quote"])
         for private in ("PRIVATE-AUTHOR", "PRIVATE-ORIGINAL-ID", "https://www.amazon.in"):
             self.assertNotIn(private, json.dumps(sent))
 
+    @patch("llm_analysis.MAX_BATCH_BYTES", 24_000)
     def test_validated_chunk_explanations_and_limits_reach_merged_report(self):
         rows = [review(index, review_body="Battery " + "x" * 1000) for index in range(40)]
         report = self.engine().analyse(rows, dataset="workspace", asin="", depth="deep")

@@ -55,6 +55,23 @@ class _NoRedirect(request.HTTPRedirectHandler):
         return None
 
 
+def chat_payload(messages, *, schema=None, tools=None, require_tool=False, max_tokens=2500, require_zdr=False):
+    """Build the same credential-free payload for planning and transmission."""
+    payload = {"model": MODEL, "messages": messages, "stream": False, "max_tokens": max_tokens,
+               "reasoning": {"enabled": False},
+               "provider": {"require_parameters": True, "data_collection": "deny",
+                            "max_price": {"prompt": 0, "completion": 0, "request": 0}},
+               "plugins": [{"id": "context-compression", "enabled": False}]}
+    if require_zdr:
+        payload["provider"]["zdr"] = True
+    if schema is not None:
+        payload["response_format"] = {"type": "json_schema", "json_schema": {
+            "name": "reviewdesk_result", "strict": True, "schema": schema}}
+    if tools is not None:
+        payload.update(tools=tools, tool_choice="required" if require_tool else "auto")
+    return payload
+
+
 class ProviderRegistry:
     def __init__(self, environ=None, transport=None):
         self._environment = os.environ if environ is None else environ
@@ -186,7 +203,7 @@ class ProviderRegistry:
             safe[target] = value
         return safe
 
-    def chat(self, messages, *, schema=None, tools=None, max_tokens=2500, cancelled=None, transport=None):
+    def chat(self, messages, *, schema=None, tools=None, require_tool=False, max_tokens=2500, cancelled=None, transport=None):
         _cancel(cancelled)
         if self._disabled:
             raise ProviderError("Free AI requests are disabled after a nonzero cost signal. Check the provider account before reconnecting.", code="cost_guard")
@@ -197,30 +214,24 @@ class ProviderRegistry:
             raise ProviderError("The model conversation is invalid or too long.", code="invalid_request")
         if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 1 <= max_tokens <= 6000:
             raise ProviderError("The model output budget is invalid.", code="invalid_request")
-        payload = {"model": MODEL, "messages": messages, "stream": False, "max_tokens": max_tokens,
-                   "reasoning": {"enabled": False},
-                   "provider": {"require_parameters": True, "data_collection": "deny",
-                                "max_price": {"prompt": 0, "completion": 0, "request": 0}},
-                   "plugins": [{"id": "context-compression", "enabled": False}]}
-        if self._require_zdr:
-            payload["provider"]["zdr"] = True
-        if schema is not None:
-            payload["response_format"] = {"type": "json_schema", "json_schema": {
-                "name": "reviewdesk_result", "strict": True, "schema": schema}}
-        if tools is not None:
-            # The application rejects multiple tool calls before executing any.
-            # Avoid requiring an optional provider flag that can remove free routes.
-            payload.update(tools=tools, tool_choice="auto")
+        if not isinstance(require_tool, bool) or (require_tool and not tools):
+            raise ProviderError("Required tool selection needs available tools.", code="invalid_request")
+        payload = chat_payload(messages, schema=schema, tools=tools, require_tool=require_tool,
+                               max_tokens=max_tokens, require_zdr=self._require_zdr)
         try:
             if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > MAX_BYTES:
                 raise ProviderError("The model request is too large.", code="invalid_request")
             result = (transport or self._transport)(payload) if (transport or self._transport) else self._request(payload, key, cancelled=cancelled)
             if not isinstance(result, Mapping):
                 raise ProviderError("The provider returned an error instead of an answer.", code="invalid_response")
-            safe_usage = self._usage(result.get("usage", {}))
+            safe_usage = self._usage({} if result.get("usage") is None else result["usage"])
             _cancel(cancelled)
             if result.get("error"):
-                raise ProviderError("The provider returned an error instead of an answer.", code="invalid_response")
+                failure = result["error"]
+                status = failure.get("code") if isinstance(failure, Mapping) else None
+                code = {400: "invalid_request", 401: "authorization", 402: "budget", 403: "authorization",
+                        404: "unavailable", 429: "rate_limit", 502: "unavailable", 503: "unavailable"}.get(status, "invalid_response") if type(status) is int else "invalid_response"
+                raise ProviderError("The provider returned an error instead of an answer.", code=code)
             choices = result.get("choices")
             if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], Mapping):
                 raise ProviderError("The provider returned an invalid answer.", code="invalid_response")
@@ -230,7 +241,9 @@ class ProviderRegistry:
             message = choice.get("message")
             if not isinstance(message, Mapping):
                 raise ProviderError("The provider returned an invalid message.", code="invalid_response")
-            content, calls = message.get("content"), message.get("tool_calls", [])
+            content, calls = message.get("content"), message.get("tool_calls")
+            if calls is None:
+                calls = []
             if content is None:
                 content = ""
             if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_BYTES or not isinstance(calls, list) or len(calls) > 3:

@@ -82,6 +82,21 @@ class ProviderTests(unittest.TestCase):
             registry.chat([{"role": "user", "content": "Synthetic"}])
         self.assertNotIn(KEY, str(caught.exception))
 
+    def test_null_optional_fields_are_unknown_usage_and_no_tool_calls(self):
+        value = completion(usage=None)
+        value["choices"][0]["message"]["tool_calls"] = None
+        result = self.registry(lambda payload: value).chat([{"role": "user", "content": "Synthetic"}])
+        self.assertEqual(result["tool_calls"], [])
+        self.assertIsNone(result["usage"]["cost"])
+        self.assertIsNone(result["usage"]["output_tokens"])
+
+    def test_provider_error_inside_http_success_exposes_only_a_safe_code(self):
+        registry = self.registry(lambda payload: {"error": {"code": 400, "message": KEY, "metadata": {"raw_error": KEY}}})
+        with self.assertRaises(ProviderError) as caught:
+            registry.chat([{"role": "user", "content": "Synthetic"}])
+        self.assertEqual(caught.exception.code, "invalid_request")
+        self.assertNotIn(KEY, str(caught.exception))
+
     def test_network_policy_has_no_redirects_remote_cache_or_retries(self):
         registry = self.registry()
         response = io.BytesIO(json.dumps(completion()).encode())

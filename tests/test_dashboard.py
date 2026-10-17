@@ -456,7 +456,7 @@ class DashboardTests(unittest.TestCase):
             entry = json.loads(payload["messages"][-1]["content"])["reviews"][0]
             content = json.dumps({"summary": "A fictional review describes product use.",
                 "themes": [{"label": "Use", "explanation": "One checked example.",
-                            "evidence": [{"key": entry["key"], "quote": (entry["body"] or entry["title"])[:80]}]}],
+                            "evidence": [next(iter(entry["body"] or entry["title"]))]}],
                 "limitations": ["A test interpretation."]})
             return {"model": "fictional/model:free", "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0},
                     "choices": [{"finish_reason": "stop", "message": {"content": content}}]}
