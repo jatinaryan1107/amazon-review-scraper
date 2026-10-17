@@ -208,7 +208,9 @@ class ProviderRegistry:
             payload["response_format"] = {"type": "json_schema", "json_schema": {
                 "name": "reviewdesk_result", "strict": True, "schema": schema}}
         if tools is not None:
-            payload.update(tools=tools, tool_choice="auto", parallel_tool_calls=False)
+            # The application rejects multiple tool calls before executing any.
+            # Avoid requiring an optional provider flag that can remove free routes.
+            payload.update(tools=tools, tool_choice="auto")
         try:
             if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > MAX_BYTES:
                 raise ProviderError("The model request is too large.", code="invalid_request")

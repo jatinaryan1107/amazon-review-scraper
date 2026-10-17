@@ -116,6 +116,49 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(engine.plan([review()])["chunks_cached"], 0)
         self.assertEqual(self.store.daily_remaining(), 49)
 
+    def test_single_json_fence_is_accepted_but_prose_and_duplicate_fields_are_rejected(self):
+        def fenced(payload):
+            value = report_response(payload)
+            content = value["choices"][0]["message"]["content"]
+            value["choices"][0]["message"]["content"] = "```json\n" + content + "\n```"
+            return value
+        result = self.engine(fenced).analyse([review()], dataset="workspace", asin="")
+        self.assertTrue(result["scope"]["analysis_complete"])
+        for content in ['Here is your report: {"summary":"x"}',
+                        '```json\n{"summary":"x"}\n```\nExtra prose',
+                        '{"summary":"x","summary":"y","themes":[],"limitations":[]}']:
+            with self.subTest(content=content), self.assertRaises(ProviderError) as caught:
+                self.engine(lambda payload: response(content)).analyse(
+                    [review(2, review_body="A different source excerpt.")], dataset="workspace", asin="")
+            self.assertEqual(caught.exception.code, "invalid_json")
+
+    def test_report_validation_exposes_safe_specific_reasons_without_raw_output(self):
+        for expected in ["report_format", "evidence_reference", "evidence_quote"]:
+            def invalid(payload):
+                value = json.loads(report_response(payload)["choices"][0]["message"]["content"])
+                if expected == "report_format":
+                    value["unexpected"] = "PRIVATE-MODEL-OUTPUT"
+                elif expected == "evidence_reference":
+                    value["themes"][0]["evidence"][0]["key"] = "PRIVATE-MODEL-OUTPUT"
+                else:
+                    value["themes"][0]["evidence"][0]["quote"] = "PRIVATE-MODEL-OUTPUT"
+                return response(json.dumps(value))
+            with self.subTest(expected=expected), self.assertRaises(ProviderError) as caught:
+                self.engine(invalid).analyse([review()], dataset="workspace", asin="")
+            self.assertEqual(caught.exception.code, expected)
+            self.assertNotIn("PRIVATE-MODEL-OUTPUT", str(caught.exception))
+        self.assertEqual(self.engine().plan([review()])["chunks_cached"], 0)
+
+    def test_agent_rejects_parallel_calls_before_running_any_tool(self):
+        calls = [{"id": identity, "type": "function", "function": {"name": "get_stats", "arguments": "{}"}}
+                 for identity in ["first", "second"]]
+        sent = []
+        engine = self.engine(lambda payload: sent.append(payload) or response(tool_calls=calls))
+        with self.assertRaises(AnalysisError):
+            engine.ask([review()], "Explain battery comments", dataset="workspace", asin="")
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn("parallel_tool_calls", sent[0])
+
     def test_local_exact_questions_need_no_credentials_or_provider_requests(self):
         self.registry.configure({"clear": True})
         def forbidden(payload):

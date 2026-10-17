@@ -122,6 +122,8 @@ Provider responses are read incrementally. A two-minute response budget prevents
 
 Requests disable optional model reasoning and ask for compact, evidence-linked answers with a 1,000-token output ceiling. Each report chunk has at most three themes and two short source quotes per theme. Broader analysis still processes the selected text in chunks and combines their validated findings locally. These settings reduce waiting on slow free endpoints; they do not guarantee response speed. A timeout accepts no partial answer and directs you to [OpenRouter Logs](https://openrouter.ai/logs) before retrying. Provider execution can continue after the local connection closes, so a timed-out request may still appear there with output tokens.
 
+Responses must pass local JSON, report structure, source key and exact-quote checks. A single complete JSON markdown fence is accepted as a formatting wrapper; surrounding prose, duplicate JSON fields, invented quotes and unknown sources are rejected. Jobs distinguish these validation failures without exposing raw provider responses or credentials. A successful provider generation is not the same as an accepted report.
+
 Reviewdesk requests providers that do not collect prompts for training and offers an additional zero data retention requirement. These controls can leave no compatible free route. The app does not silently relax them. They are routing requirements, not a promise about every aspect of provider data handling. Remote response caching and automatic context compression are disabled. See [OpenRouter provider controls](https://openrouter.ai/docs/guides/routing/provider-selection).
 
 ## Ask questions about your reviews
