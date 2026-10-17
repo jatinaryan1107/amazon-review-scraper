@@ -80,6 +80,19 @@ class EngineTests(unittest.TestCase):
         self.store.put_chunk(key, cached)
         self.assertEqual(engine.plan([review()])["chunks_cached"], 0)
 
+    def test_two_segments_of_one_review_cannot_count_as_two_sources(self):
+        def duplicate_source(payload):
+            entries = json.loads(payload["messages"][-1]["content"])["reviews"]
+            self.assertEqual(len(entries), 2)
+            value = json.loads(report_response(payload)["choices"][0]["message"]["content"])
+            value["themes"][0]["evidence"] = [next(iter(entry["body"])) for entry in entries]
+            return response(json.dumps(value))
+        rows = [review(review_body="Battery observation " * 100)]
+        with self.assertRaises(ProviderError) as caught:
+            self.engine(duplicate_source).analyse(rows, dataset="workspace", asin="", depth="deep")
+        self.assertEqual(caught.exception.code, "evidence_reference")
+        self.assertEqual(self.engine().plan(rows, depth="deep")["chunks_cached"], 0)
+
     def test_full_hundred_review_workflow_records_policy_and_reuses_validated_text(self):
         rows = [review(i, rating=str(i % 5 + 1), review_body="Fictional battery text " * 80) for i in range(100)]
         sent = []

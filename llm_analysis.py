@@ -134,7 +134,12 @@ def _model_json(content):
 def _checked_report(value, lookup):
     try:
         _compact_report_limits(value)
-        return _validate_model_report(value, lookup)
+        result = _validate_model_report(value, lookup)
+        for theme in result["themes"]:
+            identities = [item["review_id"] for item in theme["evidence"]]
+            if len(set(identities)) != len(identities):
+                raise AnalysisError("The AI report cited an unknown or duplicate review. No partial analysis was saved.")
+        return result
     except AnalysisError as exc:
         reasons = {
             "The AI report cited an unknown or duplicate review. No partial analysis was saved.": "evidence_reference",
