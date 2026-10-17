@@ -136,6 +136,23 @@ class EngineTests(unittest.TestCase):
             with self.subTest(question=filtered):
                 self.assertFalse(can_answer_locally(filtered))
 
+    def test_truncated_compact_report_is_counted_but_not_cached_or_retried(self):
+        sent = []
+        def truncated(payload):
+            sent.append(payload)
+            value = response('{"summary":"unfinished')
+            value["choices"][0]["finish_reason"] = "length"
+            return value
+        engine = self.engine(truncated)
+        with self.assertRaises(ProviderError) as caught:
+            engine.analyse([review()], dataset="workspace", asin="")
+        self.assertEqual(caught.exception.code, "incomplete")
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["max_tokens"], 1000)
+        self.assertEqual(sent[0]["reasoning"], {"enabled": False})
+        self.assertEqual(engine.plan([review()])["chunks_cached"], 0)
+        self.assertEqual(self.store.daily_remaining(), 49)
+
     def test_deep_call_budget_pauses_and_resumes_without_repeating_cached_requests(self):
         rows = [review(index, review_body="Battery " + "x" * 24000) for index in range(32)]
         engine = self.engine()

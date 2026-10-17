@@ -53,6 +53,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(payload["provider"], {"require_parameters": True, "data_collection": "deny", "zdr": True,
                                                "max_price": {"prompt": 0, "completion": 0, "request": 0}})
         self.assertEqual(payload["plugins"], [{"id": "context-compression", "enabled": False}])
+        self.assertEqual(payload["reasoning"], {"enabled": False})
         self.assertNotIn(KEY, json.dumps(payload))
         self.assertEqual(result["model"], "fictional/model:free")
         self.assertEqual(result["usage"]["input_tokens"], 10)
@@ -127,10 +128,22 @@ class ProviderTests(unittest.TestCase):
             build.return_value.open.return_value = body
             with self.assertRaises(ProviderError) as caught:
                 self.registry().chat([{"role": "user", "content": "Synthetic"}])
-        self.assertEqual(caught.exception.code, "connection")
+        self.assertEqual(caught.exception.code, "timeout")
         self.assertEqual(clock[0], 120)
         self.assertTrue(body.closed)
         self.assertEqual(build.return_value.open.call_count, 1)
+
+    def test_socket_timeouts_are_distinct_from_connection_errors_without_retries(self):
+        for failure, expected in [(TimeoutError(KEY), "timeout"),
+                                  (error.URLError(TimeoutError(KEY)), "timeout"),
+                                  (error.URLError(OSError(KEY)), "connection")]:
+            with self.subTest(expected=expected), patch("llm_provider.request.build_opener") as build:
+                build.return_value.open.side_effect = failure
+                with self.assertRaises(ProviderError) as caught:
+                    self.registry().chat([{"role": "user", "content": "Synthetic"}])
+                self.assertEqual(caught.exception.code, expected)
+                self.assertNotIn(KEY, str(caught.exception))
+                self.assertEqual(build.return_value.open.call_count, 1)
 
     def test_cancellation_during_provider_heartbeat_closes_response(self):
         cancelled = [False]

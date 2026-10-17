@@ -120,6 +120,8 @@ Validated analysis chunks and request accounting are stored in `data/analysis.sq
 
 Provider responses are read incrementally. A two-minute response budget prevents a stream of keepalive bytes from keeping a job waiting indefinitely. Cancellation and the deadline are checked between reads; a blocked network operation can take up to its forty-second socket timeout before control returns. Provider requests are not retried automatically.
 
+Requests disable optional model reasoning and ask for compact, evidence-linked answers with a 1,000-token output ceiling. Each report chunk has at most three themes and two short source quotes per theme. Broader analysis still processes the selected text in chunks and combines their validated findings locally. These settings reduce waiting on slow free endpoints; they do not guarantee response speed. A timeout accepts no partial answer and directs you to [OpenRouter Logs](https://openrouter.ai/logs) before retrying. Provider execution can continue after the local connection closes, so a timed-out request may still appear there with output tokens.
+
 Reviewdesk requests providers that do not collect prompts for training and offers an additional zero data retention requirement. These controls can leave no compatible free route. The app does not silently relax them. They are routing requirements, not a promise about every aspect of provider data handling. Remote response caching and automatic context compression are disabled. See [OpenRouter provider controls](https://openrouter.ai/docs/guides/routing/provider-selection).
 
 ## Ask questions about your reviews

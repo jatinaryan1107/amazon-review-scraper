@@ -120,13 +120,13 @@ class ProviderRegistry:
                 while True:
                     _cancel(cancelled)
                     if time.monotonic() - started >= RESPONSE_BUDGET_SECONDS:
-                        raise ProviderError("The free provider did not finish within the response budget. Its attempt remains counted.", code="connection")
+                        raise ProviderError("The free provider did not finish within the response budget. Its attempt remains counted.", code="timeout")
                     # read1 returns available bytes, including provider heartbeats.
                     # A buffered read(n) can wait indefinitely for n bytes or EOF.
                     part = response.read1(min(65_536, MAX_BYTES + 1 - len(body)))
                     _cancel(cancelled)
                     if time.monotonic() - started >= RESPONSE_BUDGET_SECONDS:
-                        raise ProviderError("The free provider did not finish within the response budget. Its attempt remains counted.", code="connection")
+                        raise ProviderError("The free provider did not finish within the response budget. Its attempt remains counted.", code="timeout")
                     if not part:
                         break
                     body.extend(part)
@@ -154,8 +154,15 @@ class ProviderRegistry:
             raise ProviderError("OpenRouter could not complete this request. No paid fallback was attempted.", code="unavailable") from None
         except (ProviderError, AnalysisCancelled):
             raise
-        except (OSError, ValueError, UnicodeError, RecursionError):
+        except TimeoutError:
+            raise ProviderError("The free provider timed out. Its attempt remains counted.", code="timeout") from None
+        except error.URLError as exc:
+            code = "timeout" if isinstance(exc.reason, TimeoutError) else "connection"
+            raise ProviderError("The provider connection did not finish. Its attempt remains counted.", code=code) from None
+        except OSError:
             raise ProviderError("The provider request could not finish. Its attempt remains counted for safety.", code="connection") from None
+        except (ValueError, UnicodeError, RecursionError):
+            raise ProviderError("The provider response was not valid JSON.", code="invalid_response") from None
 
     def _usage(self, usage):
         if not isinstance(usage, Mapping):
@@ -191,6 +198,7 @@ class ProviderRegistry:
         if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 1 <= max_tokens <= 6000:
             raise ProviderError("The model output budget is invalid.", code="invalid_request")
         payload = {"model": MODEL, "messages": messages, "stream": False, "max_tokens": max_tokens,
+                   "reasoning": {"enabled": False},
                    "provider": {"require_parameters": True, "data_collection": "deny",
                                 "max_price": {"prompt": 0, "completion": 0, "request": 0}},
                    "plugins": [{"id": "context-compression", "enabled": False}]}

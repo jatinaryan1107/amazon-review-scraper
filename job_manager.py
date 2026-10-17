@@ -31,6 +31,7 @@ PROVIDER_MESSAGES = {
     "unavailable": "A free model is unavailable with the current privacy settings. Try again later.",
     "budget": "The analysis call budget was reached. Completed chunks are saved.",
     "connection": "The provider request could not be completed. Inspect the job before trying again.",
+    "timeout": "The free model took too long. No answer was accepted. This attempt still counts; check OpenRouter Logs before retrying.",
     "invalid_response": "The provider returned a response that could not be validated.",
     "incomplete": "The provider did not finish its response. Completed chunks are saved.",
     "refusal": "The model declined this request. Local analysis remains available.",

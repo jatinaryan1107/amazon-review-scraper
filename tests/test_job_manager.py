@@ -708,6 +708,14 @@ class JobManagerTests(unittest.TestCase):
         self.assertEqual(finished["status"], "failed")
         self.assertEqual(finished["result"], {"error_code": "rate_limit", "retry_after": 4})
         self.assertNotIn("RAW-REQUEST-SECRET", json.dumps(finished) + " ".join(logs.output))
+        engine.failure = ProviderError("RAW-REQUEST-SECRET", code="timeout")
+        with self.assertLogs("job_manager", level="ERROR") as logs:
+            job = service.submit({"kind": "analysis", "analysis_method": "openrouter", "allow_external": True})
+            finished = self.wait_job(service, job["id"])
+        self.assertEqual(finished["result"], {"error_code": "timeout"})
+        self.assertIn("OpenRouter Logs", finished["detail"])
+        self.assertIsNone(service.latest_report("workspace")["report"])
+        self.assertNotIn("RAW-REQUEST-SECRET", json.dumps(finished) + " ".join(logs.output))
         engine.failure = RuntimeError("Authorization: Bearer RAW-REQUEST-SECRET")
         with self.assertLogs("job_manager", level="ERROR") as logs:
             job = service.submit({"kind": "research", "question": "What battery complaints recur?", "allow_external": True})
