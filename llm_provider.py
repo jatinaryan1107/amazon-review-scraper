@@ -141,7 +141,7 @@ class ProviderRegistry:
         self._quota_transport = quota_transport
         self._quota_lock = threading.Lock()
         self._session_key = ""
-        self._require_zdr = False
+        self._require_zdr = True
         self._disabled = False
         self._lock = threading.RLock()
 

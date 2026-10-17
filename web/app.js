@@ -32,7 +32,7 @@
     research: ["Ask your reviews", "Start with a question. Follow the evidence in your saved reviews."],
   };
   const number = (value) => new Intl.NumberFormat().format(Number(value) || 0);
-  const average = (value) => value === null || value === undefined || value === "" ? "N/A" : Number(value).toFixed(1);
+  const average = (value, precision = 1) => value === null || value === undefined || value === "" ? "N/A" : Number(value).toFixed(precision);
   const percent = (value) => `${Math.round(Number(value) || 0)}%`;
   const localQuestions = new Set([
     "how many reviews", "how many reviews are there", "how many reviews are stored",
@@ -1009,6 +1009,10 @@
     const models = Array.isArray(usage?.models) ? [...new Set(usage.models)] : [];
     if (models.length) section.append(node("p", "usage-models", `Model${models.length === 1 ? "" : "s"} returned: ${models.join(", ")}`));
     else if (model) section.append(node("p", "usage-models", `Configured model route: ${model}`));
+    if (Number(usage?.calls) > 0) {
+      const knownCost = typeof usage.cost === "number" && Number.isFinite(usage.cost) && usage.cost >= 0;
+      section.append(node("p", "usage-models", knownCost ? `Provider-reported cost: $${usage.cost.toFixed(2)} USD` : "Provider cost was not reported."));
+    }
     return section;
   }
   async function startResearch(event) {
@@ -1137,10 +1141,11 @@
     if (usage.children.length) intro.append(usage);
     if (Number(scope.excluded_reviews) > 0 || scope.body_truncated) intro.append(node("p", "report-scope-note", `${number(scope.excluded_reviews)} reviews excluded.${scope.body_truncated ? " Some review text was shortened for analysis." : ""} Findings describe the analysed sample.`));
     container.append(intro);
+    container.append(reportProcess(report));
     const ratingSection = node("section", "report-rating-section"), ratingTitle = node("div", "section-title");
     const ratingCopy = node("div"); ratingCopy.append(node("h2", "", "Rating signals"), node("p", "", "Based on star ratings, rather than inferred sentiment")); ratingTitle.append(ratingCopy); ratingSection.append(ratingTitle);
     const ratingGrid = node("div", "analysis-rating-grid");
-    const metrics = [["Average rating", average(ratings.average), `${plural(ratings.rated, "rated review")}`], ["Positive ratings", number(ratings.positive), "4 to 5 stars"], ["Neutral ratings", number(ratings.neutral), "Above 2, below 4 stars"], ["Critical ratings", number(ratings.critical), "1 to 2 stars"]];
+    const metrics = [["Average rating", average(ratings.average, 2), `${plural(ratings.rated, "rated review")}`], ["Positive ratings", number(ratings.positive), "4 to 5 stars"], ["Neutral ratings", number(ratings.neutral), "Above 2, below 4 stars"], ["Critical ratings", number(ratings.critical), "1 to 2 stars"]];
     for (const [label, value, caption] of metrics) { const item = node("div", "panel analysis-stat"); item.append(node("span", "stat-heading", label), node("strong", "", value), node("span", "field-help", caption)); ratingGrid.append(item); }
     ratingSection.append(ratingGrid); container.append(ratingSection);
     const themesSection = node("section", "workflow-section"), title = node("div", "section-title"), titleCopy = node("div");
@@ -1192,6 +1197,31 @@
     if (Number(ratings.unrated) > 0) notes.push(`${plural(ratings.unrated, "review")} had no rating and did not contribute to rating signals.`);
     if (!notes.length) notes.push("Findings describe only the selected stored reviews. They do not establish complete coverage or product quality.");
     for (const note of notes) list.append(node("li", "", note)); limitations.append(list); container.append(limitations);
+  }
+  function reportProcess(report) {
+    const details = node("details", "panel report-process"), list = node("ol"), scope = report.scope || {};
+    details.append(node("summary", "", "How this report was produced"));
+    const steps = [];
+    steps.push(`${number(scope.total_reviews)} stored reviews in this scope. This is the collected sample, not a claim about every review on Amazon.`);
+    steps.push("Python calculates the average and rating groups from the stored ratings. These numbers are not estimated by a language model.");
+    if (report.method === "local") {
+      steps.push("The local scan matches English topic keywords. It makes no AI request. Matching a word does not establish praise, a complaint, or the sentiment of a topic.");
+      steps.push("Each topic keeps exact excerpts from matching reviews. Open a source to read its full context. Topics can overlap, so their counts should not be added together.");
+    } else {
+      const router = report.method === "openrouter";
+      const selection = router && report.plan?.depth === "deep" ? "Broader coverage splits long reviews into segments and packs requests within a fixed byte budget." : "The model receives a bounded selection of review text. Shortened or excluded reviews are disclosed in the coverage notes.";
+      steps.push(`${selection} ${number(scope.analysed_reviews)} reviews were analysed; ${number(scope.excluded_reviews)} were excluded. Reviewer names and Amazon session data are not supplied by the app; review text itself may contain personal details.`);
+      steps.push(router ? "The model proposes up to three themes per batch and selects labelled passages. Python inserts the original quotes and checks their source references before saving a chunk. Cited counts are examples, not the number of all reviews expressing that view." : "The model proposes themes and quotes. Python checks that every quote occurs in the cited submitted text. Cited counts are examples, not topic prevalence.");
+      steps.push("A source match proves where a quote came from. It does not prove the interpretation. Read the linked reviews before relying on a conclusion.");
+      if (router) {
+        const provenance = report.provenance;
+        steps.push(provenance ? `Recorded request policy: free-only routing, training use denied, zero data retention ${provenance.require_zdr === true ? "required" : "not required"}.` : "This older report did not record its privacy settings. Current settings do not establish which settings produced a past report.");
+        steps.push("Validated chunks are cached locally. An unchanged run can reuse them. The plan shows calls still needed; report generation usage describes the saved report's original run. Failed requests are not retried automatically.");
+      }
+    }
+    for (const step of steps) list.append(node("li", "", step));
+    details.append(list);
+    return details;
   }
   function focusSearch() {
     navigate("reviews", true);

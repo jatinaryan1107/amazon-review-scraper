@@ -4017,3 +4017,9 @@ textarea:focus-visible{
     justify-content:center
   }
 }
+/* Keep the analysis explanation readable in both desktop and narrow layouts. */
+.report-process { padding: 20px 24px; }
+.report-process summary { cursor: pointer; font-weight: 600; }
+.report-process ol { margin: 18px 0 0; padding-left: 22px; }
+.report-process li { padding-left: 4px; margin-bottom: 12px; line-height: 1.65; color: var(--muted); }
+.report-process li:last-child { margin-bottom: 0; }

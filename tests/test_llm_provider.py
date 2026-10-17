@@ -19,6 +19,15 @@ def completion(content='{"ok":true}', **changes):
 
 
 class ProviderTests(unittest.TestCase):
+    def test_new_server_defaults_to_zdr_until_explicitly_changed(self):
+        sent = []
+        registry = self.registry(lambda payload: sent.append(payload) or completion())
+        registry.chat([{"role": "user", "content": "Fictional review"}])
+        self.assertTrue(sent[0]["provider"]["zdr"])
+        registry.configure({"require_zdr": False})
+        registry.chat([{"role": "user", "content": "Fictional review"}])
+        self.assertNotIn("zdr", sent[1]["provider"])
+
     def registry(self, transport=None, environment=None):
         registry = ProviderRegistry(environ=environment or {}, transport=transport)
         if environment is None:

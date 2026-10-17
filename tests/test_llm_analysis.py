@@ -46,6 +46,70 @@ class EngineTests(unittest.TestCase):
     def engine(self, transport=report_response):
         return LLMEngine(self.registry, self.store, transport=transport)
 
+    def test_provider_ignoring_compact_schema_cannot_save_or_cache_report(self):
+        mutations = {
+            "long_summary": lambda value, ids: value.update(summary="x" * 361),
+            "long_label": lambda value, ids: value["themes"][0].update(label="x" * 61),
+            "long_explanation": lambda value, ids: value["themes"][0].update(explanation="x" * 161),
+            "many_themes": lambda value, ids: value.update(themes=[{**value["themes"][0], "label": str(i)} for i in range(4)]),
+            "many_sources": lambda value, ids: value["themes"][0].update(evidence=ids[:3]),
+            "many_limits": lambda value, ids: value.update(limitations=["A limit"] * 3),
+            "long_limit": lambda value, ids: value.update(limitations=["x" * 161]),
+        }
+        rows = [review(i) for i in range(3)]
+        for name, mutate in mutations.items():
+            def invalid(payload):
+                entries = json.loads(payload["messages"][-1]["content"])["reviews"]
+                ids = [next(iter(entry["body"])) for entry in entries]
+                value = json.loads(report_response(payload)["choices"][0]["message"]["content"])
+                mutate(value, ids)
+                return response(json.dumps(value))
+            with self.subTest(case=name), self.assertRaises(ProviderError) as caught:
+                self.engine(invalid).analyse(rows, dataset="workspace", asin="")
+            self.assertEqual(caught.exception.code, "report_format")
+            self.assertEqual(self.engine().plan(rows)["chunks_cached"], 0)
+
+    def test_cached_report_must_still_meet_compact_limits(self):
+        engine = self.engine()
+        engine.analyse([review()], dataset="workspace", asin="")
+        canonical, _, _, _ = engine._prepare([review()], "workspace", "")
+        chunks, _, _, _ = engine._manifest(canonical, "quick")
+        key = engine._chunk_key(chunks[0], "quick")
+        cached = self.store.get_chunk(key)
+        cached["result"]["summary"] = "x" * 361
+        self.store.put_chunk(key, cached)
+        self.assertEqual(engine.plan([review()])["chunks_cached"], 0)
+
+    def test_full_hundred_review_workflow_records_policy_and_reuses_validated_text(self):
+        rows = [review(i, rating=str(i % 5 + 1), review_body="Fictional battery text " * 80) for i in range(100)]
+        sent = []
+        engine = self.engine(lambda payload: sent.append(payload) or report_response(payload))
+        result = engine.analyse(rows, dataset="workspace", asin="", depth="deep")
+        self.assertEqual(result["scope"]["analysed_reviews"], 100)
+        self.assertTrue(result["scope"]["full_coverage"])
+        self.assertEqual(result["rating_summary"]["average"], 3.0)
+        self.assertTrue(result["provenance"]["require_zdr"])
+        self.assertEqual(result["provenance"]["quote_validation"], "exact_source_match")
+        self.assertGreaterEqual(result["provenance"]["elapsed_seconds"], 0)
+        for payload in sent:
+            self.assertTrue(payload["provider"]["zdr"])
+            self.assertNotIn("PRIVATE-AUTHOR", json.dumps(payload))
+        before = len(sent)
+        again = engine.analyse(rows, dataset="workspace", asin="", depth="deep")
+        self.assertEqual(len(sent), before)
+        self.assertEqual(again["usage"]["calls"], 0)
+        self.assertEqual(again["scope"]["analysed_reviews"], 100)
+
+    def test_agent_ignoring_compact_answer_schema_is_rejected(self):
+        row = {**review(), "sent_title": "", "sent_body": "The battery lasts all evening."}
+        citation = {"key": "r1", "quote": row["sent_body"]}
+        valid = {"answer": "A cited battery observation.", "evidence": [citation], "limitations": []}
+        for changes in [{"answer": "x" * 1201}, {"limitations": ["x" * 161]},
+                        {"limitations": ["A limit"] * 3}, {"evidence": [citation] * 5}]:
+            with self.subTest(changes=changes), self.assertRaises(ProviderError) as caught:
+                LLMEngine._validate_answer({**valid, **changes}, {"r1": row})
+            self.assertEqual(caught.exception.code, "report_format")
+
     def test_quick_report_preserves_fingerprint_and_cache_avoids_second_request(self):
         sent = []
         engine = self.engine(lambda payload: sent.append(payload) or report_response(payload))
@@ -274,7 +338,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(engine.plan([review()])["chunks_cached"], 0)
         engine.analyse([review()], dataset="workspace", asin="")
         previous = engine.cache_discriminator()
-        self.registry.configure({"require_zdr": True})
+        self.registry.configure({"require_zdr": False})
         self.assertNotEqual(previous, engine.cache_discriminator())
         self.assertEqual(engine.plan([review()])["chunks_cached"], 0)
 

@@ -133,6 +133,7 @@ def _model_json(content):
 
 def _checked_report(value, lookup):
     try:
+        _compact_report_limits(value)
         return _validate_model_report(value, lookup)
     except AnalysisError as exc:
         reasons = {
@@ -143,6 +144,23 @@ def _checked_report(value, lookup):
         }
         raise ProviderError("The model report did not pass validation.",
                             code=reasons.get(str(exc), "report_format")) from None
+
+
+def _compact_report_limits(value):
+    """Enforce local bounds even when a provider ignores its JSON schema."""
+    def text(item, maximum):
+        return isinstance(item, str) and bool(item.strip()) and len(item) <= maximum
+
+    if (not isinstance(value, dict) or not text(value.get("summary"), 360)
+            or not isinstance(value.get("themes"), list) or len(value["themes"]) > 3
+            or not isinstance(value.get("limitations"), list) or len(value["limitations"]) > 2
+            or any(not text(item, 160) for item in value["limitations"])):
+        raise AnalysisError("The model report exceeded its compact format limits.")
+    for theme in value["themes"]:
+        if (not isinstance(theme, dict) or not text(theme.get("label"), 60)
+                or not text(theme.get("explanation"), 160)
+                or not isinstance(theme.get("evidence"), list) or not 1 <= len(theme["evidence"]) <= 2):
+            raise AnalysisError("The model topic exceeded its compact format limits.")
 
 
 def _report_request(chunk):
@@ -284,7 +302,7 @@ class LLMEngine:
                     or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", cached["model"])):
                 return None
             subset = {entry["key"]: lookup[entry["key"]] for entry in chunk}
-            result = _validate_model_report(cached["result"], subset)
+            result = _checked_report(cached["result"], subset)
             return result, cached["model"]
         except (KeyError, ValueError, TypeError, RecursionError):
             return None
@@ -348,6 +366,7 @@ class LLMEngine:
                 "models": [], "usage_available": True, "cost": 0.0}
 
     def analyse(self, rows, *, dataset, asin, depth="quick", cancelled=None, on_progress=None):
+        started = time.monotonic()
         original = list(rows)
         canonical, _, fingerprint, metadata = self._prepare(original, dataset, asin)
         plan = self.plan(original, dataset=dataset, asin=asin, depth=depth)
@@ -357,6 +376,11 @@ class LLMEngine:
         report = _base_report(canonical, dataset, asin)
         report.update(method="openrouter", method_label="OpenRouter free AI analysis", model=MODEL,
                       fingerprint=fingerprint, plan=plan)
+        policy = self.registry.public()
+        report["provenance"] = {"engine_version": ENGINE_VERSION, "provider": "openrouter",
+                                "route": MODEL, "free_only": True, "training_data_collection": "deny",
+                                "require_zdr": policy.get("require_zdr") is True,
+                                "quote_validation": "exact_source_match"}
         usage = self._usage()
         completed, checked = [], []
         pause = None
@@ -443,6 +467,7 @@ class LLMEngine:
             processed_segments=len(processed_keys), total_segments=len(selected_keys),
             partial=not complete, analysis_complete=complete, full_coverage=full)
         report["usage"] = usage
+        report["provenance"]["elapsed_seconds"] = round(time.monotonic() - started, 3)
         report["limitations"].extend(plan["notes"])
         model_limits = {}
         for index, item in enumerate(checked, 1):
@@ -653,9 +678,9 @@ class LLMEngine:
         if not isinstance(value, dict) or set(value) != {"answer", "evidence", "limitations"}:
             raise ProviderError("The assistant answer did not match its required format.", code="report_format")
         answer, citations, limits = value["answer"], value["evidence"], value["limitations"]
-        if not isinstance(answer, str) or not answer.strip() or len(answer) > 3000 or not isinstance(citations, list) or not 1 <= len(citations) <= 12:
+        if not isinstance(answer, str) or not answer.strip() or len(answer) > 1200 or not isinstance(citations, list) or not 1 <= len(citations) <= 4:
             raise ProviderError("The assistant did not provide a bounded answer with review evidence.", code="report_format")
-        if not isinstance(limits, list) or len(limits) > 6 or any(not isinstance(item, str) or not item.strip() or len(item) > 300 for item in limits):
+        if not isinstance(limits, list) or len(limits) > 2 or any(not isinstance(item, str) or not item.strip() or len(item) > 160 for item in limits):
             raise ProviderError("The assistant returned invalid limitations.", code="report_format")
         evidence, seen = [], set()
         for citation in citations:
