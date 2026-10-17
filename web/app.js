@@ -571,10 +571,11 @@
     $("research-help").textContent = local ? "This exact statistics question runs locally. No model call or API key is needed." : "Exact count, average rating, and rating distribution prompts can run locally. Filtered questions and other research use OpenRouter with your permission.";
     $("research-provider-note").hidden = routerReady;
     $("research-provider-note").firstElementChild.textContent = router.disabled ? "AI research is disabled after a cost signal. Check AI settings. Local statistics questions still work." : "Local questions work now. Add an OpenRouter key for model research.";
-    $("provider-save").disabled = state.providerSaving || busy;
-    $("provider-key").disabled = state.providerSaving || busy || state.provider?.key_source === "environment";
-    $("provider-zdr").disabled = state.providerSaving || busy;
-    $("provider-clear").disabled = state.providerSaving || busy || state.provider?.key_source !== "session";
+    const providerBusy = busy && (active.kind === "research" || active.options?.analysis_method === "openrouter");
+    $("provider-save").disabled = state.providerSaving || providerBusy;
+    $("provider-key").disabled = state.providerSaving || providerBusy || state.provider?.key_source === "environment";
+    $("provider-zdr").disabled = state.providerSaving || providerBusy;
+    $("provider-clear").disabled = state.providerSaving || providerBusy || state.provider?.key_source !== "session";
   }
   function routerStatus() {
     const capabilities = state.automation?.capabilities;
