@@ -43,10 +43,11 @@
 
   <button id="sidebar-overlay" class="sidebar-overlay" aria-label="Close navigation" hidden></button>
   <aside class="sidebar" id="sidebar" aria-label="Workspace navigation">
-    <a class="brand" href="#overview" aria-label="Reviewdesk overview"><span class="brand-mark"><svg viewBox="0 0 28 28" aria-hidden="true"><path d="M6 6h9a7 7 0 010 14h-4l-5 4V6z"/><path d="M11 11h7M11 15h4"/></svg></span><span>reviewdesk<span class="brand-dot">.</span></span></a>
+    <a class="brand" href="#buying" aria-label="Reviewdesk home"><span class="brand-mark"><svg viewBox="0 0 28 28" aria-hidden="true"><path d="M6 6h9a7 7 0 010 14h-4l-5 4V6z"/><path d="M11 11h7M11 15h4"/></svg></span><span>reviewdesk<span class="brand-dot">.</span></span></a>
     <div class="workspace-picker"><span class="workspace-avatar"><svg class="icon"><use href="#i-layers"/></svg></span><div><label for="dataset-select">WORKSPACE</label><select id="dataset-select" aria-label="Choose dataset"><option value="demo">Demo workspace</option><option value="workspace">My workspace</option></select></div><svg class="icon picker-chevron"><use href="#i-down"/></svg></div>
     <p class="nav-label">EXPLORE</p>
     <nav class="main-nav" aria-label="Main navigation">
+      <a href="#buying" class="nav-item" data-view="buying"><svg class="icon"><use href="#i-spark"/></svg><span>Buying brief</span></a>
       <a href="#overview" class="nav-item active" data-view="overview" aria-current="page"><svg class="icon"><use href="#i-grid"/></svg><span>Overview</span></a>
       <a href="#reviews" class="nav-item" data-view="reviews"><svg class="icon"><use href="#i-message"/></svg><span>Reviews</span><span class="nav-count" id="nav-review-count">0</span></a>
       <a href="#products" class="nav-item" data-view="products"><svg class="icon"><use href="#i-box"/></svg><span>Products</span><span class="nav-count" id="nav-product-count">0</span></a>
@@ -65,6 +66,27 @@
       <div id="page-error" class="error-panel" role="alert" hidden><svg class="icon"><use href="#i-info"/></svg><div><strong>We couldn't load your workspace</strong><p id="page-error-message"></p></div><button id="retry-button" class="button button-white">Try again</button></div>
       <div id="loading-panel" class="loading-panel" role="status"><span class="spinner"></span><span>Loading your workspace...</span></div>
 
+      <section id="view-buying" class="view" aria-label="Buying brief" hidden>
+        <div id="buying-saved-shortcut" class="buying-saved-shortcut" hidden><span>Your latest review check is saved.</span><button type="button" id="buying-jump" class="text-button">View saved brief<svg class="icon"><use href="#i-down"/></svg></button></div>
+        <section class="panel buying-composer" aria-labelledby="buying-heading">
+          <div class="buying-intro"><span class="eyebrow">YOUR PRIORITIES. OWNER EVIDENCE.</span><h2 id="buying-heading">What should you know before buying?</h2><p>Start with a product. Choose what matters, then inspect the benefits, concerns and unanswered questions in its saved reviews.</p></div>
+          <form id="buying-form">
+            <div class="form-field"><label for="buying-product">Amazon India product link or ASIN</label><input id="buying-product" type="text" list="buying-suggestions" maxlength="2048" required placeholder="Paste a product link, or choose a saved product" autocomplete="off" aria-describedby="buying-source-help"></div>
+            <datalist id="buying-suggestions"></datalist>
+            <p id="buying-source-help" class="field-help">Uses reviews saved in this workspace. For a new product, we will guide you to collection first.</p>
+            <div id="buying-second-wrap" class="form-field" hidden><label for="buying-second">Second product to compare</label><input id="buying-second" type="text" list="buying-suggestions" maxlength="2048" placeholder="Paste another Amazon India link or ASIN" autocomplete="off"></div>
+            <div class="buying-shortcuts"><button id="buying-compare" type="button" class="text-button" aria-expanded="false" aria-controls="buying-second-wrap">Compare another product</button><button id="buying-example" type="button" class="text-button">Try a saved product</button><button id="buying-demo" type="button" class="text-button">Explore fictional examples</button></div>
+            <fieldset class="buying-priorities"><legend>What matters most to you?</legend><p class="field-help">Choose up to three. Leave blank for a general brief. These priorities are designed for headphones, earbuds and speakers.</p><div class="priority-options"><label><input type="checkbox" name="buying-priority" value="calls"><span>Clear calls</span></label><label><input type="checkbox" name="buying-priority" value="comfort"><span>Comfort</span></label><label><input type="checkbox" name="buying-priority" value="sound"><span>Sound</span></label><label><input type="checkbox" name="buying-priority" value="battery"><span>Battery life</span></label><label><input type="checkbox" name="buying-priority" value="durability"><span>Durability</span></label></div></fieldset>
+            <label class="check-field buying-sharing"><input id="buying-consent" type="checkbox"><span><strong>Add AI interpretation</strong><small>Send selected review text and ratings to OpenRouter using free models. Without this, you get local source evidence. No Amazon login data is sent.</small></span></label>
+            <p id="buying-ai-status" class="field-help"></p><button id="buying-ai-setup" type="button" class="text-button" data-open-settings hidden>Set up optional AI</button>
+            <div id="buying-error" class="form-message error" role="alert" hidden></div>
+            <div class="buying-submit"><p class="field-help">Original quotes stay one click away. No overall score or automatic purchase.</p><button id="buying-submit" class="button button-primary" type="submit"><svg class="icon"><use href="#i-arrow"/></svg>Build my brief</button></div>
+          </form>
+        </section>
+        <div id="buying-progress" class="panel buying-progress" role="status" aria-live="polite" hidden></div>
+        <div id="buying-results" class="buying-results" aria-live="polite"></div>
+        <section id="buying-empty" class="buying-empty"><div><span>01</span><h3>Bring a product</h3><p>Use its link or choose from your saved library.</p></div><div><span>02</span><h3>Make it personal</h3><p>Choose the qualities that matter to your everyday use.</p></div><div><span>03</span><h3>Check the tradeoffs</h3><p>Read the owner evidence, including what remains uncertain.</p></div></section>
+      </section>
       <section id="view-overview" class="view" aria-label="Review overview" hidden>
         <div id="stats-grid" class="stats-grid"></div>
         <div class="overview-middle"><section class="panel rating-panel"><div class="panel-heading"><div><h2>Rating breakdown</h2><p>A closer look at the feedback</p></div><span class="subtle-icon"><svg class="icon"><use href="#i-star"/></svg></span></div><div class="rating-layout"><div class="rating-summary"><div class="rating-average" id="distribution-average">0.0</div><div class="stars" id="distribution-stars" aria-hidden="true"></div><span class="muted" id="distribution-total">0 reviews</span></div><div class="rating-bars" id="rating-bars"></div></div><div class="panel-footnote"><svg class="icon"><use href="#i-info"/></svg><span>Choose a rating to explore its reviews.</span></div></section><section class="panel products-snapshot"><div class="panel-heading"><div><h2>Your products</h2><p>Feedback at a glance</p></div><button class="text-button" data-go-view="products">View all<svg class="icon"><use href="#i-arrow"/></svg></button></div><div id="product-snapshot"></div></section></div>

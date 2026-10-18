@@ -298,7 +298,7 @@ class AutomationService:
                 active = self._decode(connection.execute(
                     "SELECT * FROM jobs WHERE status IN ('queued','running','cancelling') LIMIT 1"
                 ).fetchone())
-            if active and (active["kind"] == "research" or active["options"].get("analysis_method") == "openrouter"):
+            if active and (active["kind"] in {"research", "brief"} or active["options"].get("analysis_method") == "openrouter"):
                 raise JobConflict("Stop the active AI job before changing its provider settings.")
             try:
                 self._registry().configure(payload)
@@ -376,6 +376,7 @@ class AutomationService:
             "collection": {"kind", "urls", "max_pages", "resume", "transport", "analyse", "analysis_method", "allow_external"},
             "analysis": {"kind", "dataset", "asin", "analysis_method", "allow_external", "depth"},
             "research": {"kind", "dataset", "asin", "question", "allow_external", "research_mode"},
+            "brief": {"kind", "dataset", "products", "priorities", "allow_external"},
             "auth": {"kind"},
         }
         if not isinstance(kind, str) or kind not in allowed or set(payload) - allowed[kind]:
@@ -388,6 +389,10 @@ class AutomationService:
         external = payload.get("allow_external", False)
         if not isinstance(external, bool):
             raise ValueError("External analysis consent must be true or false.")
+        if kind == "brief":
+            from buying_brief import validate_options
+            options = validate_options(payload.get("dataset", "workspace"), payload.get("products"), payload.get("priorities", []))
+            return kind, {**options, "allow_external": external}
         if kind == "research":
             from llm_analysis import can_answer_locally
             dataset, asin, question = payload.get("dataset", "workspace"), payload.get("asin", ""), payload.get("question")
@@ -578,6 +583,26 @@ class AutomationService:
                 report_id, dataset, asin, cache_method, fingerprint, model, json.dumps(report, ensure_ascii=False, allow_nan=False), now()))
         return report_id, False
 
+    def _brief(self, job_id, options):
+        from buying_brief import build_brief
+        self._update(job_id, phase="researching", detail="Finding owner evidence for your priorities.")
+        rows = [row for asin in options["asins"] for row in self._rows(options["dataset"], asin)]
+        result = build_brief(self._engine(), rows, dataset=options["dataset"], products=options["asins"],
+            priorities=options["priorities"], allow_external=options["allow_external"], cancelled=self._cancel.is_set,
+            on_progress=lambda event: self._update(job_id, phase="analysing", detail="Writing your buying brief from selected owner evidence.",
+                progress={"selected_reviews": event["selected_reviews"]}))
+        if self._cancel.is_set() or self._shutdown.is_set():
+            self._update(job_id, status="cancelled", phase="finished", detail="Buying brief stopped. Saved reviews remain available.")
+            return
+        names = {product["asin"]: product for product in self.data.overview(options["dataset"])["products"]}
+        for product in result["products"]:
+            info = names.get(product["asin"], {})
+            product.update(name=info.get("name", ""), last_review_added_at=info.get("last_review_added_at"))
+        if len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 131072:
+            raise ValueError("The buying brief exceeded its saved result limit.")
+        self._update(job_id, status="succeeded", phase="finished", result=result,
+            detail="Your buying brief is ready. Check the owner evidence behind each finding." if result["method"] == "openrouter" else "Owner evidence is ready. AI interpretation is not included.")
+
     def _research(self, job_id, options):
         self._update(job_id, phase="researching", detail="Inspecting saved review evidence.")
         answer = self._engine().ask(self._rows(options["dataset"], options["asin"]), options["question"],
@@ -640,6 +665,9 @@ class AutomationService:
                     result.update(diagnostics)
             self._update(job_id, status="cancelled" if cancelled else "paused" if partial else "succeeded", phase="finished",
                          result=result, detail=detail)
+            return
+        if kind == "brief":
+            self._brief(job_id, options)
             return
         if kind == "research":
             self._research(job_id, options)
@@ -708,7 +736,7 @@ class AutomationService:
                 try:
                     self._run(job)
                 except Exception as exc:
-                    provider_job = job["kind"] == "research" or (job["kind"] == "analysis" and job["options"].get("analysis_method") in {"openai", "openrouter"})
+                    provider_job = job["kind"] in {"research", "brief"} or (job["kind"] == "analysis" and job["options"].get("analysis_method") in {"openai", "openrouter"})
                     if provider_job:
                         detail, result = provider_failure(exc)
                         if job["options"].get("analysis_method") == "openai" and not isinstance(exc, ProviderError):

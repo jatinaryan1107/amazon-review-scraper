@@ -567,6 +567,51 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(job["result"]["usage"]["calls"], 0)
         self.assertEqual(self.post_json("/api/jobs", {"kind": "analysis", "analysis_method": "openrouter", "allow_external": True})[0], 400)
 
+    def test_buying_brief_http_validates_inputs_and_saves_local_product_scopes(self):
+        payload = {"kind": "brief", "dataset": "workspace", "products": ["B0TEST0001", "B0TEST0002"], "priorities": ["comfort"], "allow_external": False}
+        for changes in [{"products": []}, {"products": ["B0TEST0001", "B0TEST0001"]}, {"products": ["https://evil.invalid/dp/B0TEST0001"]}, {"priorities": ["price"]}, {"allow_external": "yes"}, {"dataset": "other"}]:
+            self.assertEqual(self.post_json("/api/jobs", {**payload, **changes})[0], 400)
+        self.seed_workspace([self.review(review_body="Comfortable fit."), self.review(asin="B0TEST0002", product_url="https://www.amazon.in/dp/B0TEST0002", review_body="The fit feels tight.")])
+        self.data.name_product({"dataset": "workspace", "asin": "B0TEST0001", "name": "Fictional headphones"})
+        status, _, content = self.post_json("/api/jobs", payload)
+        self.assertEqual(status, 202, content)
+        job_id = json.loads(content)["job"]["id"]
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            job = self.server.automation.get_job(job_id)
+            if job["status"] not in {"queued", "running", "cancelling"}: break
+            threading.Event().wait(0.01)
+        self.assertEqual(job["status"], "succeeded", job)
+        result = job["result"]
+        self.assertEqual(result["usage"]["calls"], 0)
+        self.assertEqual(result["products"][0]["name"], "Fictional headphones")
+        self.assertEqual([item["asin"] for item in result["products"]], payload["products"])
+        self.assertEqual(result["method"], "local_evidence")
+        self.assertEqual(result["tradeoffs"], [])
+        self.assertTrue(any(item["id"] == job_id for item in self.get_json("/api/automation")["jobs"]))
+
+    def test_buying_brief_http_uses_one_fake_request_then_a_revalidated_cache(self):
+        from test_buying_brief import completion
+        sent = []
+        registry = ProviderRegistry(environ={}, transport=lambda payload: sent.append(payload) or completion(payload))
+        registry.configure({"api_key": "SYNTHETIC-BUYING-KEY"})
+        self.server.automation._provider_registry = registry
+        self.seed_workspace([self.review(review_body="Comfortable fit and good battery life.")])
+        payload = {"kind": "brief", "dataset": "workspace", "products": ["B0TEST0001"], "priorities": ["comfort"], "allow_external": True}
+        for calls in [1, 0]:
+            status, _, content = self.post_json("/api/jobs", payload)
+            self.assertEqual(status, 202, content)
+            job_id = json.loads(content)["job"]["id"]
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                job = self.server.automation.get_job(job_id)
+                if job["status"] not in {"queued", "running", "cancelling"}: break
+                threading.Event().wait(0.01)
+            self.assertEqual(job["status"], "succeeded", job)
+            self.assertEqual(job["result"]["method"], "openrouter")
+            self.assertEqual(job["result"]["usage"]["calls"], calls)
+        self.assertEqual(len(sent), 1)
+
     def test_http_provider_errors_do_not_echo_messages_or_unsafe_retry_values(self):
         failure = ProviderError("RAW-REQUEST-SECRET", code="rate_limit", retry_after=12.2)
         with patch.object(self.server.automation, "analysis_plan", side_effect=failure):
