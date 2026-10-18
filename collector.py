@@ -8,7 +8,7 @@ import csv
 from pathlib import Path
 from typing import Protocol
 
-from review_parser import detect_page_state, extract_asin, parse_reviews
+from review_parser import detect_page_state, extract_asin, parse_reviews, parse_product_name
 from review_store import ReviewStore
 
 
@@ -109,6 +109,7 @@ def collect_product(
     fingerprints = set()
     diagnostic = None
     http_status = None
+    product_name = ""
     durable_position = (cursor_url, cursor_steps, pages_completed)
 
     def restore_committed_position():
@@ -124,6 +125,7 @@ def collect_product(
             counts = store.save_page(
                 asin, rows, next_url=cursor_url, pages_completed=pages_completed,
                 status=status, detail=detail, replay_steps=cursor_steps,
+                product_name=product_name if page else "",
             )
         except BaseException:
             # Never skip an unsaved page when parsing or a DB transaction fails.
@@ -246,6 +248,7 @@ def collect_product(
                 save("failed", detail)
                 return result("failed", detail)
             rows = parse_reviews(snapshot.html, asin, product_url)
+            product_name = parse_product_name(snapshot.html, asin)
             if not rows:
                 detail = "Review elements were detected but no rows could be extracted."
                 save("failed", detail)

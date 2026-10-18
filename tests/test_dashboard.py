@@ -126,6 +126,51 @@ class DashboardTests(unittest.TestCase):
         self.assertFalse(self.data.path("workspace").exists())
         self.assertEqual(self.data.path("workspace").name, "reviews.sqlite3")
 
+    def test_product_names_persist_and_search_matches_name_with_existing_filters(self):
+        self.seed_workspace([self.review(), self.review(review_id="SECOND", rating="1")])
+        status, _, content = self.post_json("/api/products/name", {"dataset": "workspace", "asin": "B0TEST0001", "name": "Fictional 50%_off speaker"})
+        self.assertEqual(status, 200, content)
+        product = self.get_json("/api/overview?dataset=workspace")["products"][0]
+        self.assertEqual(product["name"], "Fictional 50%_off speaker")
+        self.assertEqual(product["name_source"], "manual")
+        self.assertEqual(product["critical_count"], 1)
+        self.assertEqual(product["product_url"], "https://www.amazon.in/dp/B0TEST0001")
+        rows = self.get_json("/api/reviews?dataset=workspace&q=50%25_off&rating=critical")["items"]
+        self.assertEqual([row["review_id"] for row in rows], ["SECOND"])
+        with ReviewStore(self.data.path("workspace"), read_only=True) as store:
+            self.assertEqual(store.product_names()["B0TEST0001"]["name"], product["name"])
+
+    def test_naming_rejects_unknown_product_invalid_input_and_cross_origin(self):
+        valid = {"dataset": "workspace", "asin": "B0TEST0001", "name": "Fictional speaker"}
+        self.assertEqual(self.post_json("/api/products/name", valid)[0], 400)
+        self.assertFalse(self.data.path("workspace").exists())
+        self.seed_workspace([self.review()])
+        for payload in [None, [], {**valid, "dataset": "demo"}, {**valid, "name": ""}, {**valid, "name": "x" * 501}, {**valid, "asin": 123}, {**valid, "extra": True}]:
+            self.assertEqual(self.post_json("/api/products/name", payload)[0], 400)
+        self.assertEqual(self.post_json("/api/products/name", valid, Origin="https://example.invalid")[0], 403)
+        self.assertEqual(self.request("/api/products/name", method="POST", body=json.dumps(valid), headers={"Content-Type": "application/json"})[0], 403)
+
+    def test_csv_names_round_trip_without_overwriting_manual_names(self):
+        row = {**self.review(), "product_name": "Fictional speaker"}
+        self.assertEqual(self.upload(self.csv_bytes([row], (*REVIEW_FIELDS, "product_name")))[0], 200)
+        _, _, content = self.request("/api/export?dataset=workspace")
+        exported = next(csv.DictReader(io.StringIO(content.decode("utf-8-sig"))))
+        self.assertEqual(exported["product_name"], "Fictional speaker")
+        self.post_json("/api/products/name", {"dataset": "workspace", "asin": row["asin"], "name": "My speaker"})
+        self.upload(self.csv_bytes([row], (*REVIEW_FIELDS, "product_name")))
+        self.assertEqual(self.get_json("/api/overview?dataset=workspace")["products"][0]["name"], "My speaker")
+
+    def test_conflicting_csv_names_and_invalid_reviews_save_no_metadata(self):
+        rows = [{**self.review(), "product_name": "First name"}, {**self.review(review_id="SECOND"), "product_name": "Different name"}]
+        self.assertEqual(self.upload(self.csv_bytes(rows, (*REVIEW_FIELDS, "product_name")))[0], 400)
+        self.assertFalse(self.data.path("workspace").exists())
+        rows[1]["product_name"] = "First name"
+        rows[1]["rating"] = "9"
+        self.assertEqual(self.upload(self.csv_bytes(rows, (*REVIEW_FIELDS, "product_name")))[0], 400)
+        with ReviewStore(self.data.path("workspace"), read_only=True) as store:
+            self.assertEqual(store.product_names(), {})
+            self.assertEqual(store.summary()["total_reviews"], 0)
+
     def test_search_is_literal_and_composes_with_filters(self):
         self.seed_workspace([
             self.review(review_id="A", review_body="Battery: 50%_off\\today", rating="4.4"),
@@ -181,7 +226,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(headers["Content-Disposition"], 'attachment; filename="reviewdesk-demo.csv"')
         reader = csv.DictReader(io.StringIO(content.decode("utf-8-sig"), newline=""))
         rows = list(reader)
-        self.assertEqual(reader.fieldnames, list(REVIEW_FIELDS))
+        self.assertEqual(reader.fieldnames, [*REVIEW_FIELDS, "product_name"])
         self.assertEqual(len(rows), reviews["total"])
         self.assertGreater(len(rows), 1)
         self.assertEqual(rows[0]["review_id"], reviews["items"][0]["review_id"])

@@ -188,6 +188,7 @@
     banner.querySelector(".badge").textContent = demo ? "SAMPLE DATA" : "LOCAL DATA";
   }
   function syncFilters() {
+    renderProductContext();
     $("review-search").value = state.filters.q;
     $("product-filter").value = state.filters.asin;
     $("rating-filter").value = state.filters.rating;
@@ -257,7 +258,7 @@
     const filter = $("product-filter");
     filter.replaceChildren(node("option", "", "All products")); filter.firstElementChild.value = "";
     for (const product of data.products) {
-      const option = node("option", "", product.name || product.asin); option.value = product.asin; filter.append(option);
+      const option = node("option", "", productLabel(product)); option.value = product.asin; filter.append(option);
     }
     if (!data.products.some((p) => p.asin === state.filters.asin)) state.filters.asin = "";
     syncFilters();
@@ -297,8 +298,62 @@
   function productArt(index = 0) {
     const art = node("span", `product-art tone-${index % 3}`); art.append(icon("box")); return art;
   }
-  function productName(asin) { return state.overview?.products.find((product) => product.asin === asin)?.name || asin || "Unknown product"; }
-  function exploreProduct(asin) { resetFilters(); state.filters.asin = asin; syncFilters(); navigate("reviews", true); }
+  function productName(asin) { return state.overview?.products.find((product) => product.asin === asin)?.name || (asin ? `Product ${asin}` : "Unknown product"); }
+  function productLabel(product) { return `${product.name || "Name not saved"} · ${product.asin}`; }
+  function exploreProduct(asin) {
+    resetFilters(); state.filters.asin = asin; syncFilters();
+    const alreadyOpen = state.view === "reviews"; navigate("reviews", true);
+    if (alreadyOpen) loadReviews();
+  }
+  function inspectAction(asin, view) {
+    $("analysis-consent").checked = false; $("research-consent").checked = false;
+    const alreadyOpen = state.view === view;
+    if (view === "analysis") {
+      $("analysis-product").value = asin;
+    } else { $("research-product").value = asin; renderResearch(); }
+    navigate(view, true);
+    if (view === "analysis") { if (alreadyOpen) loadAnalysis(); loadAnalysisPlan(); }
+  }
+  function renderProductContext() {
+    let panel = $("product-context");
+    if (!panel) { panel = node("section", "panel product-context"); panel.id = "product-context"; panel.setAttribute("aria-label", "Selected product"); $("view-reviews").prepend(panel); }
+    const product = state.overview?.products.find((item) => item.asin === state.filters.asin);
+    panel.hidden = !product; panel.replaceChildren(); if (!product) return;
+    const heading = node("div", "product-context-heading"), identity = node("div");
+    identity.append(node("span", "eyebrow", "PRODUCT INSPECTION"), node("h2", "", product.name || "Product name not saved"), node("span", "product-id", `ASIN ${product.asin}`));
+    heading.append(identity, button("All products", "text-button", () => navigate("products", true), "arrow"));
+    const facts = node("div", "inspection-facts");
+    for (const [value, label] of [[average(product.average_rating), "Average stored rating / 5"], [number(product.review_count), "Stored reviews"], [number(product.critical_count), "Reviews at 1 or 2 stars"], [number(product.verified_count), "Marked verified"]]) {
+      const fact = node("div"); fact.append(node("strong", "", value), node("span", "", label)); facts.append(fact);
+    }
+    const actions = node("div", "inspection-actions");
+    actions.append(button("View findings", "button button-primary", () => inspectAction(product.asin, "analysis"), "spark"), button("Ask about this product", "button button-white", () => inspectAction(product.asin, "research"), "message"), button("Read critical reviews", "text-button", () => {
+      state.filters.q = ""; state.filters.rating = "critical"; state.filters.verified = "all"; state.filters.page = 1; syncFilters(); loadReviews();
+    }));
+    if (state.dataset !== "demo") {
+      const link = node("a", "text-button", "View on Amazon"); link.href = product.product_url; link.target = "_blank"; link.rel = "noopener noreferrer"; link.append(icon("external")); actions.append(link);
+      actions.append(button(product.name ? "Edit name" : "Add product name", "text-button", () => openProductName(product), "box"));
+    }
+    panel.append(heading, facts, node("p", "field-help", "These figures describe saved reviews, not every Amazon rating. Amazon may share reviews across product variants."));
+    if (product.last_review_added_at) panel.append(node("p", "field-help", `Reviews last added ${dateLabel(product.last_review_added_at)}. Product names are saved labels; check Amazon for the current listing and price.`));
+    panel.append(actions);
+  }
+  function openProductName(product) {
+    $("product-name-asin").value = product.asin; $("product-name-input").value = product.name || "";
+    $("product-name-reference").textContent = `ASIN ${product.asin}. Your name will be kept when reviews are collected again.`;
+    messageAt("product-name-error", ""); $("product-name-dialog").showModal(); $("product-name-input").focus();
+  }
+  async function saveProductName(event) {
+    event.preventDefault(); const control = $("product-name-save"); if (control.disabled) return;
+    control.disabled = true; messageAt("product-name-error", "");
+    try {
+      await postJson("/api/products/name", {dataset: state.dataset, asin: $("product-name-asin").value, name: $("product-name-input").value});
+      $("product-name-dialog").close(); await loadOverview(true); renderProductContext();
+      if (state.view === "reviews") await loadReviews(); state.researchRenderKey = ""; renderResearch(); if (state.analysis) renderAnalysis();
+      toast("Product name saved on this device.");
+    } catch (error) { messageAt("product-name-error", error.message); }
+    finally { control.disabled = false; }
+  }
   function renderProductSnapshot(products) {
     const container = $("product-snapshot");
     container.replaceChildren(...products.slice(0, 3).map((product, index) => {
@@ -344,20 +399,24 @@
     if (!reviews.length) empty($("recent-empty"), "Your first review belongs here", "Add a CSV to start exploring your product feedback.", "message", { label: "Import reviews", run: openImport, icon: "upload" });
   }
   function renderProducts(products) {
-    $("products-count").textContent = plural(products.length, "product");
+    const total = products.length, query = $("product-search").value.trim().toLocaleLowerCase(), sort = $("product-sort").value;
+    products = products.filter((product) => `${product.name} ${product.asin}`.toLocaleLowerCase().includes(query)).slice();
+    products.sort((a, b) => sort === "name" ? productName(a.asin).localeCompare(productName(b.asin)) : sort === "rating" ? (Number(b.average_rating) || 0) - (Number(a.average_rating) || 0) || a.asin.localeCompare(b.asin) : b.review_count - a.review_count || a.asin.localeCompare(b.asin));
+    $("products-count").textContent = query ? `${number(products.length)} of ${plural(total, "product")}` : `${plural(total, "product")} in this workspace`;
     $("products-grid").replaceChildren(...products.map((product, index) => {
       const card = node("article", "product-card"), top = node("div", "product-card-top");
       top.append(productArt(index), node("span", "badge", state.overview.dataset.is_demo ? "DEMO PRODUCT" : "PRODUCT"));
       const metrics = node("div", "product-card-metrics");
-      [[number(product.review_count), "Total reviews"], [average(product.average_rating), "Average rating / 5"]].forEach(([value, label]) => {
+      [[number(product.review_count), "Stored reviews"], [average(product.average_rating), "Average stored rating / 5"]].forEach(([value, label]) => {
         const metric = node("div"); metric.append(node("strong", "", value), node("span", "", label)); metrics.append(metric);
       });
       const foot = node("div", "product-card-foot");
-      foot.append(node("span", "muted", `${number(product.verified_count)} verified`), button("Explore reviews", "text-button", () => exploreProduct(product.asin), "arrow"));
-      card.append(top, node("h2", "", product.name || product.asin), node("span", "product-id", product.asin), metrics, foot); return card;
+      foot.append(node("span", "muted", `${number(product.critical_count)} critical review${Number(product.critical_count) === 1 ? "" : "s"}`), button("Inspect product", "text-button", () => exploreProduct(product.asin), "arrow"));
+      const title = node("h2", "", product.name || "Product name not saved"); title.title = product.name || product.asin;
+      card.append(top, title, node("span", "product-id", `ASIN ${product.asin}`), metrics, foot); return card;
     }));
     $("products-empty").hidden = products.length > 0;
-    if (!products.length) empty($("products-empty"), "Make room for your products", "Products appear here as soon as you import their reviews.", "box", { label: "Import reviews", run: openImport, icon: "upload" });
+    if (!products.length) empty($("products-empty"), query ? "No products match your search" : "Make room for your products", query ? "Try a product name or its ASIN." : "Products appear here as soon as you import their reviews.", "box", query ? { label: "Clear search", run: () => { $("product-search").value = ""; renderProducts(state.overview?.products || []); } } : { label: "Import reviews", run: openImport, icon: "upload" });
   }
   function renderCollection(checkpoints) {
     $("collection-list").replaceChildren(...checkpoints.map((checkpoint) => {
@@ -379,6 +438,7 @@
     if (!checkpoints.length) empty($("collection-empty"), "No saved product positions", state.overview.dataset.is_demo ? "Demo reviews are fictional. Live collection saves product progress in My workspace." : "Each collected page saves a position here. CSV imports do not create collection checkpoints.", "layers");
   }
   async function loadReviews() {
+    renderProductContext();
     state.reviewController?.abort();
     state.reviewController = new AbortController();
     const version = ++state.reviewVersion;
@@ -530,7 +590,7 @@
       const all = node("option", "", "All products"); all.value = "";
       select.replaceChildren(all);
       for (const product of products) {
-        const option = node("option", "", product.name || product.asin);
+        const option = node("option", "", productLabel(product));
         option.value = product.asin; select.append(option);
       }
       select.value = products.some((product) => product.asin === selected) ? selected : "";
@@ -953,6 +1013,7 @@
     if (state.dataset === dataset) return;
     clearTimeout(state.searchTimer);
     state.dataset = dataset; $("dataset-select").value = dataset;
+    $("product-search").value = "";
     savePreference("reviewdesk-dataset", dataset); resetFilters();
     for (const id of ["analysis-product", "research-product"]) {
       $(id).replaceChildren(node("option", "", "All products")); $(id).firstElementChild.value = "";
@@ -1101,7 +1162,7 @@
         if (quotes.length > 1) entry.append(node("p", "muted", `${number(quotes.length)} passages from one review`));
         for (const quote of quotes) entry.append(node("blockquote", "", quote));
         const open = button("Read source review", "text-button", () => openEvidence(source, job.options.dataset, open), "arrow");
-        const footer = node("div", "evidence-source"); footer.append(node("code", "", source.asin), open); entry.append(footer); evidence.append(entry);
+      const footer = node("div", "evidence-source"); footer.append(node("span", "source-product-name", productName(source.asin)), node("code", "", source.asin), open); entry.append(footer); evidence.append(entry);
       }
       card.append(evidence);
     }
@@ -1188,7 +1249,7 @@
     topline.append(node("span", "eyebrow", "SAVED ANALYSIS"), node("span", "badge", report.method_label || report.method || "Analysis"));
     if (report.method === "openrouter") topline.append(node("span", "badge", report.plan?.depth === "deep" ? "BROADER COVERAGE" : "QUICK SAMPLE"));
     if (scope.full_coverage === true) topline.append(node("span", "badge", "STORED TEXT COVERED"));
-    intro.append(topline, node("h2", "", scope.asin ? `Feedback for ${scope.asin}` : "Your feedback, in perspective"), node("p", "report-summary", report.summary || "No summary was generated."));
+    intro.append(topline, node("h2", "", scope.asin ? `Feedback for ${productName(scope.asin)}` : "Your feedback, in perspective"), node("p", "report-summary", report.summary || "No summary was generated."));
     const metadata = node("div", "report-metadata");
     metadata.append(node("span", "", `${plural(scope.analysed_reviews, "review")} analysed of ${number(scope.total_reviews)}`), node("span", "", `Generated ${timeLabel(report.generated_at)}`), node("span", "", scope.dataset === "demo" ? "Fictional demo reviews" : "My workspace"));
     intro.append(metadata);
@@ -1233,7 +1294,7 @@
           if (quotes.length > 1) evidenceCard.append(node("p", "muted", `${number(quotes.length)} passages from one review`));
           for (const quote of quotes) evidenceCard.append(node("blockquote", "", quote));
           const action = button("Read source review", "text-button", () => openEvidence(evidence, scope.dataset || state.dataset, action), "arrow");
-          const source = node("div", "evidence-source"); source.append(node("code", "", evidence.asin || ""), action); evidenceCard.append(source);
+          const source = node("div", "evidence-source"); source.append(node("span", "source-product-name", productName(evidence.asin)), node("code", "", evidence.asin || ""), action); evidenceCard.append(source);
           (sourceIndex < 3 ? evidenceList : moreSources).append(evidenceCard);
         }
         if (sources.length > 3) {
@@ -1310,6 +1371,10 @@
     if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
   });
   $("dataset-select").value = state.dataset;
+  $("product-search").addEventListener("input", () => renderProducts(state.overview?.products || []));
+  $("product-sort").addEventListener("change", () => renderProducts(state.overview?.products || []));
+  $("product-name-form").addEventListener("submit", saveProductName);
+  $("product-name-dialog").addEventListener("cancel", (event) => { if ($("product-name-save").disabled) event.preventDefault(); });
   $("dataset-select").addEventListener("change", () => chooseDataset($("dataset-select").value));
   $("menu-toggle").addEventListener("click", () => setMenu(!$("sidebar").classList.contains("open")));
   $("sidebar-overlay").addEventListener("click", () => { setMenu(false); $("menu-toggle").focus(); });

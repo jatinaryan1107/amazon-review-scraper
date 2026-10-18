@@ -192,6 +192,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         try:
             parsed = urlsplit(self.path)
+            if not parsed.scheme and not parsed.netloc and parsed.path == "/api/products/name":
+                if parsed.query:
+                    raise ValueError("Product names do not accept query filters.")
+                accepted, payload = self.read_action_json()
+                if accepted:
+                    self.json_response(200, self.server.data.name_product(payload))
+                return
             if not parsed.scheme and not parsed.netloc and parsed.path == "/api/provider/check":
                 if parsed.query:
                     raise ValueError("Quota checks do not accept query filters.")

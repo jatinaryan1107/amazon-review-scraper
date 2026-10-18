@@ -34,7 +34,16 @@ REVIEW_FIELDS = (
 CHECKPOINT_STATUSES = frozenset(
     {"in_progress", "complete", "paused", "blocked", "failed", "zero_reviews", "partial"}
 )
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+def product_name(value: Any) -> str:
+    if not isinstance(value, str) or any(ord(char) < 32 and not char.isspace() for char in value):
+        raise ValueError("Product name must be plain text.")
+    name = " ".join(value.split())
+    if not 1 <= len(name) <= 500:
+        raise ValueError("Use a product name between 1 and 500 characters.")
+    return name
 
 _ASIN = re.compile(r"[A-Z0-9]{10}\Z", re.ASCII)
 _PRODUCT_PATH = re.compile(
@@ -209,6 +218,9 @@ class ReviewStore:
         if table == "reviews":
             required = set(REVIEW_FIELDS) | {"source", "created_at"}
             expected_primary_key = ["asin", "review_id"]
+        elif table == "products":
+            required = {"asin", "name", "name_source", "updated_at"}
+            expected_primary_key = ["asin"]
         else:
             required = {"asin", "next_url", "pages_completed", "status", "detail", "updated_at"}
             if not allow_legacy:
@@ -234,6 +246,8 @@ class ReviewStore:
             raise ValueError("Not a review database: missing tables: " + ", ".join(sorted(missing)))
         for table in ("reviews", "checkpoints"):
             self._validate_table(table, allow_legacy=allow_legacy)
+        if self._connection.execute("PRAGMA user_version").fetchone()[0] >= 2:
+            self._validate_table("products", allow_legacy=False)
 
     def _table_names(self) -> set[str]:
         return {
@@ -250,6 +264,8 @@ class ReviewStore:
         for table in ("reviews", "checkpoints"):
             if table in tables:
                 self._validate_table(table, allow_legacy=True)
+        if "products" in tables:
+            self._validate_table("products", allow_legacy=False)
         self._connection.execute("PRAGMA foreign_keys = ON")
         with self._connection:
             self._connection.execute("BEGIN")
@@ -291,6 +307,14 @@ class ReviewStore:
                     "ALTER TABLE checkpoints ADD COLUMN replay_steps INTEGER NOT NULL "
                     "DEFAULT 0 CHECK (replay_steps >= 0)"
                 )
+            self._connection.execute("""
+                CREATE TABLE IF NOT EXISTS products (
+                    asin TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    name_source TEXT NOT NULL CHECK (name_source IN ('manual', 'amazon', 'import', 'research')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                )
+            """)
             self._validate_schema(allow_legacy=False)
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -321,13 +345,37 @@ class ReviewStore:
         return {"inserted": inserted, "duplicates": duplicates}
 
     def upsert_reviews(
-        self, reviews: Iterable[Mapping[str, Any]], source: str = "import"
+        self, reviews: Iterable[Mapping[str, Any]], source: str = "import", *, product_names=None
     ) -> dict[str, int]:
         """Insert a batch, preserving existing rows and rolling back on errors."""
         self._require_writable()
         normalized_source = _source(source)
         with self._connection:
-            return self._insert((_review(row) for row in reviews), normalized_source)
+            counts = self._insert((_review(row) for row in reviews), normalized_source)
+            for asin, name in (product_names or {}).items():
+                self._set_product_name(asin, name, "import")
+            return counts
+
+    def product_names(self) -> dict[str, dict[str, str]]:
+        if "products" not in self._table_names():
+            return {}
+        return {row["asin"]: dict(row) for row in self._connection.execute("SELECT * FROM products")}
+
+    def _set_product_name(self, asin, name, source):
+        if source not in {"manual", "amazon", "import", "research"}:
+            raise ValueError("Unsupported product name source.")
+        self._connection.execute("""
+            INSERT INTO products (asin, name, name_source) VALUES (?, ?, ?)
+            ON CONFLICT (asin) DO UPDATE SET name=excluded.name, name_source=excluded.name_source,
+                updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE (CASE products.name_source WHEN 'manual' THEN 3 WHEN 'amazon' THEN 2 ELSE 1 END)
+               <= (CASE excluded.name_source WHEN 'manual' THEN 3 WHEN 'amazon' THEN 2 ELSE 1 END)
+        """, (_asin(asin), product_name(name), source))
+
+    def set_product_name(self, asin, name, *, source="manual"):
+        self._require_writable()
+        with self._connection:
+            self._set_product_name(asin, name, source)
 
     def save_page(
         self,
@@ -340,6 +388,7 @@ class ReviewStore:
         detail: str = "",
         source: str = "live",
         replay_steps: int = 0,
+        product_name: str = "",
     ) -> dict[str, int]:
         """Commit a page's reviews and its resume checkpoint in one transaction."""
         self._require_writable()
@@ -363,6 +412,8 @@ class ReviewStore:
 
         with self._connection:
             counts = self._insert(checked_reviews(), normalized_source)
+            if product_name:
+                self._set_product_name(normalized_asin, product_name, "amazon")
             self._connection.execute(
                 """
                 INSERT INTO checkpoints (asin, next_url, pages_completed, status, detail, replay_steps)

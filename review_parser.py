@@ -142,6 +142,22 @@ def extract_asin(url: str) -> str | None:
     return match.group(1).upper() if match else None
 
 
+def parse_product_name(html: str, asin: str) -> str:
+    """Read explicit product labels, never guess a name from customer review text."""
+    root = _tree(html)
+    for node in root.walk():
+        if node.attrs.get("id") == "productTitle" or node.attrs.get("data-hook") in {"product-link", "product-title"}:
+            href = node.attrs.get("href", "")
+            if href and extract_asin("https://www.amazon.in" + href if href.startswith("/") else href) != asin:
+                continue
+            name = _value(node)
+            if 1 <= len(name) <= 500:
+                return name
+    title = next((_value(node) for node in root.walk() if node.tag == "title"), "")
+    match = re.fullmatch(r"Amazon\.in\s*:\s*Customer reviews\s*:\s*(.+)", title, re.IGNORECASE)
+    return match[1].strip() if match and 1 <= len(match[1].strip()) <= 500 else ""
+
+
 def parse_reviews(html: str, asin: str, product_url: str) -> list[dict[str, str]]:
     """Extract the nine CSV fields from review containers in supplied HTML.
 

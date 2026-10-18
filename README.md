@@ -63,6 +63,14 @@ Downloads from the interface are spreadsheet-safe CSVs. Cells that could be inte
 
 Use `--port` to change the port, `--data-dir` to select a different local data folder, or `--auth-file` to choose the saved session file. The server listens only on `127.0.0.1` and has no account or deployment system. Run one dashboard per data folder. A process lock prevents two workers from using the same job database.
 
+### Inspect a product
+
+Find products by name or ASIN in **Products**, then choose **Inspect product**. The inspection summary shows stored review counts, average rating, critical reviews at 1 or 2 stars, verification markers and when reviews were added. Open findings or ask a question directly for that product. These figures describe saved evidence, not every Amazon rating or a live market price. Review sorting uses when reviews were added to the workspace.
+
+Product names appear in cards, filters, analysis headings and cited sources. The ASIN stays visible to distinguish similar models and variants. Collection saves explicit product titles when the supported page supplies them. Missing titles remain clearly labelled and can be named locally. **Edit name** stores a local label that later collection and imports do not overwrite. Names are plain display text and do not change review identities or analysis evidence.
+
+Dashboard CSV imports accept an optional `product_name` column; use one consistent name per ASIN. Dashboard exports include this column and escape spreadsheet formulas. Existing nine-column imports still work. Standalone CLI exports retain the original nine review fields. Database schema 2 adds product metadata transactionally; read-only access to older supported databases remains available without migrating them. Back up a database before using it with an older application version.
+
 ## Collect and analyse from Reviewdesk
 
 Install live collection support once:

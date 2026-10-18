@@ -12,7 +12,7 @@ import sqlite3
 from typing import Any
 
 from offline import DEMO_CSV, SYNTHETIC_NOTICE, open_csv_rows
-from review_store import REVIEW_FIELDS, ReviewStore
+from review_store import REVIEW_FIELDS, ReviewStore, product_name
 
 
 MAX_IMPORT_BYTES = 5 * 1024 * 1024
@@ -69,8 +69,8 @@ class ReviewQuery:
         rating = values.get("rating", "all")
         verified = values.get("verified", "all")
         sort = values.get("sort", "newest")
-        if rating not in {"all", "1", "2", "3", "4", "5"}:
-            raise ValueError("The rating filter must be all or a number from 1 to 5.")
+        if rating not in {"all", "critical", "1", "2", "3", "4", "5"}:
+            raise ValueError("Choose all ratings, critical reviews, or a star rating from 1 to 5.")
         if verified not in {"all", "true", "false"}:
             raise ValueError("Choose all, verified, or unverified purchases.")
         if sort not in SORTS:
@@ -82,7 +82,7 @@ class ReviewQuery:
             raise ValueError("Page and page size must be whole numbers.") from exc
         return cls(dataset, q, asin, rating, verified, sort, page, page_size)
 
-    def where(self) -> tuple[str, list[Any]]:
+    def where(self, *, product_names=False) -> tuple[str, list[Any]]:
         clauses: list[str] = []
         params: list[Any] = []
         if self.q:
@@ -92,10 +92,15 @@ class ReviewQuery:
                 ("review_title", "review_body", "reviewer_name", "review_id", "asin")
             ) + ")")
             params.extend([f"%{literal}%"] * 5)
+            if product_names:
+                clauses[-1] = clauses[-1][:-1] + " OR asin IN (SELECT asin FROM products WHERE name LIKE ? ESCAPE '\\'))"
+                params.append(f"%{literal}%")
         if self.asin:
             clauses.append("asin = ?")
             params.append(self.asin)
-        if self.rating != "all":
+        if self.rating == "critical":
+            clauses.append("rating != '' AND CAST(rating AS REAL) <= 2")
+        elif self.rating != "all":
             clauses.append(f"rating != '' AND {RATING_BUCKET} = ?")
             params.append(int(self.rating))
         if self.verified != "all":
@@ -112,6 +117,27 @@ class DashboardData:
         with open_csv_rows(DEMO_CSV) as rows:
             with ReviewStore(self.path("demo")) as store:
                 store.upsert_reviews(rows, source="synthetic-demo")
+
+    @staticmethod
+    def _has_names(connection):
+        return bool(connection and connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='products'").fetchone())
+
+    def name_product(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {"dataset", "asin", "name"} or payload["dataset"] != "workspace":
+            raise ValueError("Name a product in My workspace using dataset, asin and name.")
+        if not isinstance(payload["asin"], str):
+            raise ValueError("Choose a valid product ASIN.")
+        query = ReviewQuery.parse({"dataset": ["workspace"], "asin": [payload["asin"]]})
+        if not query.asin:
+            raise ValueError("Choose a product to name.")
+        name = product_name(payload["name"])
+        with self.connection("workspace") as connection:
+            exists = connection and connection.execute("SELECT 1 FROM reviews WHERE asin=? LIMIT 1", (query.asin,)).fetchone()
+        if not exists:
+            raise ValueError("This product is not in your saved reviews.")
+        with ReviewStore(self.path("workspace")) as store:
+            store.set_product_name(query.asin, name)
+        return {"asin": query.asin, "name": name, "name_source": "manual"}
 
     def path(self, dataset: str) -> Path:
         if dataset not in DATASETS:
@@ -169,11 +195,16 @@ class DashboardData:
             products = connection.execute("""
                 SELECT asin, COUNT(*) AS review_count,
                        AVG(CASE WHEN rating != '' THEN CAST(rating AS REAL) END) AS average_rating,
-                       SUM(verified_purchase = 'true') AS verified_count
+                       SUM(verified_purchase = 'true') AS verified_count,
+                       SUM(rating != '' AND CAST(rating AS REAL) <= 2) AS critical_count,
+                       MAX(created_at) AS last_review_added_at
                 FROM reviews GROUP BY asin ORDER BY review_count DESC, asin
             """)
+            names = {row["asin"]: dict(row) for row in connection.execute("SELECT * FROM products")} if self._has_names(connection) else {}
             result["products"] = [
-                {**dict(row), "name": DEMO_NAMES.get(row["asin"], row["asin"]) if dataset == "demo" else row["asin"]}
+                {**dict(row), "name": DEMO_NAMES.get(row["asin"], "") if dataset == "demo" else names.get(row["asin"], {}).get("name", ""),
+                 "name_source": "demo" if dataset == "demo" else names.get(row["asin"], {}).get("name_source", ""),
+                 "product_url": "" if dataset == "demo" else f"https://www.amazon.in/dp/{row['asin']}"}
                 for row in products
             ]
             result["checkpoints"] = [
@@ -190,7 +221,7 @@ class DashboardData:
 
     def reviews(self, query: ReviewQuery) -> dict[str, Any]:
         with self.connection(query.dataset) as connection:
-            where, params = query.where()
+            where, params = query.where(product_names=self._has_names(connection))
             total = connection.execute("SELECT COUNT(*) FROM reviews" + where, params).fetchone()[0] if connection else 0
             pages = max(1, math.ceil(total / query.page_size))
             page = min(query.page, pages)
@@ -208,15 +239,17 @@ class DashboardData:
 
     def export(self, query: ReviewQuery) -> bytes:
         buffer = io.StringIO(newline="")
-        writer = csv.DictWriter(buffer, fieldnames=REVIEW_FIELDS)
+        writer = csv.DictWriter(buffer, fieldnames=(*REVIEW_FIELDS, "product_name"))
         writer.writeheader()
         with self.connection(query.dataset) as connection:
             if connection:
-                where, params = query.where()
+                where, params = query.where(product_names=self._has_names(connection))
+                names = {row["asin"]: row["name"] for row in connection.execute("SELECT asin, name FROM products")} if self._has_names(connection) else {}
                 for row in connection.execute(
                     f"SELECT {', '.join(REVIEW_FIELDS)} FROM reviews{where} ORDER BY {SORTS[query.sort]}", params
                 ):
-                    writer.writerow({key: spreadsheet_cell(row[key]) for key in REVIEW_FIELDS})
+                    writer.writerow({**{key: spreadsheet_cell(row[key]) for key in REVIEW_FIELDS},
+                                     "product_name": spreadsheet_cell(DEMO_NAMES.get(row["asin"], "") if query.dataset == "demo" else names.get(row["asin"], ""))})
         return buffer.getvalue().encode("utf-8-sig")
 
     def import_csv(self, payload: bytes) -> dict[str, Any]:
@@ -238,19 +271,25 @@ class DashboardData:
             missing = set(REVIEW_FIELDS) - set(headers)
             if missing:
                 raise ValueError("The CSV is missing columns: " + ", ".join(sorted(missing)) + ".")
-            rows = []
+            rows, names = [], {}
             for row in reader:
                 if None in row or any(value is None for value in row.values()):
                     raise ValueError(f"CSV row {reader.line_num} does not match the column headers.")
                 if len(rows) == MAX_IMPORT_ROWS:
                     raise ValueError("Import at most 10,000 reviews at a time.")
                 rows.append({field: row[field] for field in REVIEW_FIELDS})
+                if row.get("product_name", "").strip():
+                    name = product_name(row["product_name"])
+                    asin = row["asin"].strip()
+                    if asin in names and names[asin] != name:
+                        raise ValueError("Use one consistent product name per ASIN in a CSV.")
+                    names[asin] = name
         except csv.Error as exc:
             raise ValueError("The CSV could not be read. Check its quoting and column lengths.") from exc
         if not rows:
             raise ValueError("The CSV has column headers but no reviews to import.")
         with ReviewStore(self.path("workspace")) as store:
-            counts = store.upsert_reviews(rows, source="dashboard-import")
+            counts = store.upsert_reviews(rows, source="dashboard-import", product_names=names)
             total = store.summary()["total_reviews"]
         return {**counts, "total_reviews": total,
                 "message": f"Imported {counts['inserted']} reviews. Skipped {counts['duplicates']} duplicates."}
