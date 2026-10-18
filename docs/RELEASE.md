@@ -10,6 +10,7 @@ The intended product direction is a hosted app that anyone can use. See the [pub
 - One live ten-review OpenRouter report completed, passed local validation, saved and displayed its sources. The provider reported $0.00. That result establishes one successful small run, not a reliability guarantee.
 - A broader 100-review plan included all stored text in one request. Its live attempt received HTTP 404 and saved no AI report. The app retained the failure without retrying, paying for another route or relaxing privacy.
 - Local statistics and keyword reports work independently of provider availability.
+- Compatible JSON mode does not require native provider JSON support, while retaining strict local validation. Provider-enforced JSON is an explicit alternative. Fictional-response tests cover both modes, cache isolation, exact encoded request sizing, safe routing categories and rejection of unavailable source passages. No live compatibility-mode report has been accepted yet.
 - Automated tests use fictional reviews and fake model responses. They cover pagination recovery, duplicate handling, transactions, cancellation, validation, privacy boundaries, cache reuse and request budgets. CI runs on Windows and Linux with Python 3.10 and 3.13.
 
 Live collection pins Playwright to the version used in this workspace. The offline app needs only Python's standard library. Recheck the pinned dependency and its browser build before a release; a pin makes updates deliberate, not permanently safe.

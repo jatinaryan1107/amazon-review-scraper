@@ -29,7 +29,7 @@ PROVIDER_MESSAGES = {
     "authorization": "OpenRouter could not authorize this request. Check the configured key.",
     "rate_limit": "A rate limit blocked this request. The response did not identify which limit.",
     "check_busy": "An account quota check is already running. Wait for its result.",
-    "unavailable": "A free model is unavailable with the current privacy settings. Try again later.",
+    "unavailable": "A compatible free model route is unavailable. The saved response does not identify why.",
     "budget": "The analysis call budget was reached. Completed chunks are saved.",
     "connection": "The provider request could not be completed. Inspect the job before trying again.",
     "timeout": "The free model took too long. No answer was accepted. This attempt still counts; check OpenRouter Logs before retrying.",
@@ -64,6 +64,14 @@ def provider_failure(error):
         message = "The model provider is limiting requests. Your daily OpenRouter allowance may still be available."
     elif code == "rate_limit" and details.get("rate_limit_source") == "openrouter":
         message = "OpenRouter blocked this request under a platform rate limit. Check the account counter and reset details."
+    if code in {"unavailable", "invalid_request"}:
+        message = {
+            "privacy_policy": "OpenRouter reported a data-policy routing restriction. Check account and key policies before another run.",
+            "required_parameters": "OpenRouter reported no route supporting the required parameters. Review the response format and requested features.",
+            "region_policy": "OpenRouter reported a region routing restriction. Review the account and provider region requirements.",
+            "model_unavailable": "OpenRouter reported that the requested model is unavailable.",
+            "no_matching_endpoint": "OpenRouter reported no matching endpoint, without identifying which requirement excluded it.",
+        }.get(details.get("routing_reason"), message)
     return message, result
 
 
@@ -244,13 +252,16 @@ class AutomationService:
                 "key_source": source if isinstance(source, str) and source in {"environment", "session", "none"} else "none",
                 "model": "openrouter/free", "free_only": True, "privacy": "deny_training",
                 "daily_limit": 50, "require_zdr": public.get("require_zdr") is True,
+                "response_mode": "prompt" if public.get("response_mode") == "prompt" else "schema",
                 "disabled": public.get("disabled") is True}
 
     def configure_provider(self, payload):
-        if not isinstance(payload, dict) or not payload or set(payload) - {"api_key", "clear", "require_zdr"}:
+        if not isinstance(payload, dict) or not payload or set(payload) - {"api_key", "clear", "require_zdr", "response_mode"}:
             raise ValueError("Supply an OpenRouter key, clear the session key, or change the privacy setting.")
         if "require_zdr" in payload and not isinstance(payload["require_zdr"], bool):
             raise ValueError("The zero data retention setting must be true or false.")
+        if "response_mode" in payload and (not isinstance(payload["response_mode"], str) or payload["response_mode"] not in {"prompt", "schema"}):
+            raise ValueError("Choose compatible JSON or provider-enforced JSON.")
         if "clear" in payload and payload["clear"] is not True:
             raise ValueError("Clear must be true to forget the session key.")
         if "api_key" in payload:

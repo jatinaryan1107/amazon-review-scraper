@@ -14,7 +14,7 @@ from review_analysis import (AnalysisCancelled, AnalysisError, _base_report,
                              _round_robin, _validate_model_report, report_fingerprint)
 
 
-ENGINE_VERSION = 5
+ENGINE_VERSION = 6
 MAX_CALLS = 30
 MAX_CHARS = 24_000
 MAX_OUTPUT_TOKENS = 1000
@@ -175,10 +175,11 @@ def _report_request(chunk):
     return messages, _compact_report_schema(list(citations)), citations
 
 
-def _request_bytes(chunk):
+def _request_bytes(chunk, response_mode="schema", require_zdr=True):
     messages, schema, _ = _report_request(chunk)
     # Include the full schema and privacy controls, not just review characters.
-    payload = chat_payload(messages, schema=schema, max_tokens=MAX_OUTPUT_TOKENS, require_zdr=True)
+    payload = chat_payload(messages, schema=schema, max_tokens=MAX_OUTPUT_TOKENS,
+                           require_zdr=require_zdr, response_mode=response_mode)
     return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
 
@@ -211,7 +212,8 @@ class LLMEngine:
         if depth not in {"quick", "deep"}:
             raise AnalysisError("Choose quick or deep analysis.")
         policy = self.registry.public()
-        identity = _hash([policy["provider"], policy["model"], policy["privacy"], policy.get("require_zdr", False)])[:8]
+        identity = _hash([policy["provider"], policy["model"], policy["privacy"], policy.get("require_zdr", False),
+                          policy.get("response_mode", "schema")])[:8]
         return f"openrouter:{depth}:v{ENGINE_VERSION}:{identity}"
 
     def _prepare(self, rows, dataset, asin):
@@ -246,6 +248,8 @@ class LLMEngine:
     def _manifest(self, canonical, depth):
         if depth not in {"quick", "deep"}:
             raise AnalysisError("Choose quick or deep analysis.")
+        policy = self.registry.public()
+        response_mode = policy.get("response_mode", "schema")
         entries, lookup = [], {}
         truncated = set()
         segmented = set()
@@ -285,7 +289,7 @@ class LLMEngine:
             # Exact sizing with binary search avoids repeatedly encoding growing batches.
             while low <= high:
                 middle = (low + high) // 2
-                if _request_bytes(entries[offset:middle]) <= MAX_BATCH_BYTES:
+                if _request_bytes(entries[offset:middle], response_mode, policy.get("require_zdr", False)) <= MAX_BATCH_BYTES:
                     best, low = middle, middle + 1
                 else:
                     high = middle - 1
@@ -313,12 +317,16 @@ class LLMEngine:
             return None
 
     def plan(self, rows, *, dataset="workspace", asin="", depth="quick"):
+        policy = self.registry.public()
+        response_mode = policy.get("response_mode", "schema")
         canonical, _, _, metadata = self._prepare(rows, dataset, asin)
         chunks, lookup, truncated, segmented = self._manifest(canonical, depth)
         cached = sum(self._cached(chunk, lookup, depth) is not None for chunk in chunks)
         selected = len({lookup[entry["key"]]["review_id"] for chunk in chunks for entry in chunk})
         notes = ["Exact statistics are computed locally. Only review title, body, rating and product identity are sent.",
                  "Free model availability and the account's actual remaining quota may be lower than this local budget."]
+        notes.append("Compatible JSON requests are validated locally without requiring provider JSON support."
+                     if response_mode == "prompt" else "Provider-enforced JSON is required, followed by the same local validation.")
         if depth == "quick":
             notes.append("Quick analysis uses one bounded, balanced sample. It does not read every stored review.")
         if truncated:
@@ -330,13 +338,14 @@ class LLMEngine:
         remaining = self.store.daily_remaining()
         needed = len(chunks) - cached
         return {"depth": depth, "provider": "openrouter", "model": MODEL, "free_only": True,
-                "engine_version": ENGINE_VERSION, "total_reviews": len(canonical),
+                "engine_version": ENGINE_VERSION, "response_mode": response_mode,
+                "require_zdr": policy.get("require_zdr", False), "total_reviews": len(canonical),
                 "selected_reviews": selected, "excluded_reviews": len(canonical) - selected,
                 **metadata, "segmented_reviews": len(segmented), "chunks_total": len(chunks),
                 "chunks_cached": cached, "calls_needed": needed,
                 "calls_this_run": min(needed, MAX_CALLS, remaining), "max_calls": MAX_CALLS,
                 "daily_remaining": remaining, "input_characters": sum(len(json.dumps(_wire_chunk(chunk)[0], ensure_ascii=False)) for chunk in chunks),
-                "request_bytes": sum(_request_bytes(chunk) for chunk in chunks),
+                "request_bytes": sum(_request_bytes(chunk, response_mode, policy.get("require_zdr", False)) for chunk in chunks),
                 "batch_request_byte_limit": MAX_BATCH_BYTES if depth == "deep" else None,
                 "full_coverage": selected == len(canonical) and not truncated and not metadata["conflicting_variants"],
                 "notes": notes}
@@ -385,6 +394,7 @@ class LLMEngine:
         report["provenance"] = {"engine_version": ENGINE_VERSION, "provider": "openrouter",
                                 "route": MODEL, "free_only": True, "training_data_collection": "deny",
                                 "require_zdr": policy.get("require_zdr") is True,
+                                "response_mode": policy.get("response_mode", "schema"),
                                 "quote_validation": "exact_source_match"}
         usage = self._usage()
         completed, checked = [], []

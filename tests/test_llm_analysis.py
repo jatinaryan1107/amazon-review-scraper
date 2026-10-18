@@ -46,6 +46,53 @@ class EngineTests(unittest.TestCase):
     def engine(self, transport=report_response):
         return LLMEngine(self.registry, self.store, transport=transport)
 
+    def test_response_mode_changes_request_contract_cache_and_recorded_provenance(self):
+        captured = []
+        rows = [review()]
+        engine = self.engine(lambda payload: captured.append(payload) or report_response(payload))
+        prompt = engine.analyse(rows, dataset="workspace", asin="", depth="deep")
+        self.assertNotIn("response_format", captured[0])
+        self.assertEqual(prompt["provenance"]["response_mode"], "prompt")
+        self.assertEqual(engine.plan(rows, depth="deep")["chunks_cached"], 1)
+        self.registry.configure({"response_mode": "schema"})
+        plan = engine.plan(rows, depth="deep")
+        self.assertEqual(plan["response_mode"], "schema")
+        self.assertEqual(plan["chunks_cached"], 0)
+        strict = engine.analyse(rows, dataset="workspace", asin="", depth="deep")
+        self.assertIn("response_format", captured[1])
+        self.assertEqual(strict["provenance"]["response_mode"], "schema")
+        self.assertEqual(strict["themes"], prompt["themes"])
+        self.assertEqual(len(captured), 2)
+
+    def test_both_response_modes_reject_unknown_sources_without_cache_or_retry(self):
+        rows = [review()]
+        for mode in ("prompt", "schema"):
+            sent = []
+            self.registry.configure({"response_mode": mode})
+            def invalid(payload):
+                sent.append(payload)
+                value = json.loads(report_response(payload)["choices"][0]["message"]["content"])
+                value["themes"][0]["evidence"] = ["unknown-passage"]
+                return response(json.dumps(value))
+            with self.subTest(mode=mode), self.assertRaises(ProviderError) as caught:
+                self.engine(invalid).analyse(rows, dataset="workspace", asin="", depth="deep")
+            self.assertEqual(caught.exception.code, "evidence_reference")
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(self.engine().plan(rows, depth="deep")["chunks_cached"], 0)
+
+    def test_plan_sizes_the_actual_mode_and_privacy_policy(self):
+        for mode in ("prompt", "schema"):
+            for zdr in (True, False):
+                self.registry.configure({"response_mode": mode, "require_zdr": zdr})
+                sent = []
+                rows = [review()]
+                engine = self.engine(lambda payload: sent.append(payload) or report_response(payload))
+                plan = engine.plan(rows, depth="deep")
+                engine.analyse(rows, dataset="workspace", asin="", depth="deep")
+                with self.subTest(mode=mode, zdr=zdr):
+                    self.assertEqual(plan["request_bytes"], len(json.dumps(sent[0], ensure_ascii=False).encode("utf-8")))
+                    self.assertEqual(plan["require_zdr"], zdr)
+
     def test_provider_ignoring_compact_schema_cannot_save_or_cache_report(self):
         mutations = {
             "long_summary": lambda value, ids: value.update(summary="x" * 361),
@@ -370,6 +417,8 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result["usage"]["calls"], 2)
         self.assertEqual(calls[0]["tool_choice"], "required")
         self.assertNotIn("response_format", calls[0])
+        self.assertNotIn("response_format", calls[1])
+        self.assertIn('"answer"', calls[1]["messages"][0]["content"])
         self.assertEqual(result["evidence"][0]["quote"], "The battery lasts all evening.")
         self.assertEqual([step["name"] for step in result["steps"] if step["kind"] == "tool"], ["search_reviews"])
         self.assertNotIn("PRIVATE-ORIGINAL-ID", json.dumps(calls))

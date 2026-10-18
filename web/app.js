@@ -578,6 +578,7 @@
     $("provider-save").disabled = state.providerSaving || state.providerChecking || providerBusy;
     $("provider-key").disabled = state.providerSaving || state.providerChecking || providerBusy || state.provider?.key_source === "environment";
     $("provider-zdr").disabled = state.providerSaving || state.providerChecking || providerBusy;
+    $("provider-response-mode").disabled = state.providerSaving || state.providerChecking || providerBusy;
     $("provider-clear").disabled = state.providerSaving || state.providerChecking || providerBusy || state.provider?.key_source !== "session";
     $("provider-check").disabled = state.providerSaving || state.providerChecking || providerBusy || !["session", "environment"].includes(state.provider?.key_source);
     $("provider-check").textContent = state.providerChecking ? "Checking account..." : "Check OpenRouter quota";
@@ -746,6 +747,7 @@
         if (job.kind === "collection" && previous && previous.inserted !== job.progress?.reviews_inserted) refreshData = true;
         state.jobStatuses.set(job.id, { status: job.status, inserted: job.progress?.reviews_inserted });
       }
+      const activityChanged = (state.automation?.jobs || []).map((job) => `${job.id}:${job.status}`).join("|") !== (data.jobs || []).map((job) => `${job.id}:${job.status}`).join("|");
       state.automation = data;
       $("automation-error-message").textContent = ""; $("automation-error").hidden = true;
       renderAutomation();
@@ -756,6 +758,7 @@
         if (state.view === "reviews") loadReviews();
       }
       if (refreshAnalysis) { loadAnalysis(); loadAnalysisPlan(); }
+      else if (activityChanged && state.view === "analysis" && state.analysis?.report) renderAnalysis();
       if (refreshProvider) loadProvider();
     } catch (error) {
       if (error.name === "AbortError" || version !== state.automationVersion) return;
@@ -776,6 +779,8 @@
   function describeProviderDiagnostics(details) {
     if (!details || typeof details !== "object") return "";
     const parts = [];
+    const routing = { privacy_policy: "Reported routing reason: data policy.", required_parameters: "Reported routing reason: required parameters.", region_policy: "Reported routing reason: region policy.", model_unavailable: "Reported routing reason: model unavailable.", no_matching_endpoint: "Reported routing reason: no matching endpoint; the excluding requirement was not identified." };
+    if (Object.hasOwn(routing, details.routing_reason)) parts.push(routing[details.routing_reason]);
     if (details.rate_limit_source === "provider") parts.push("The response identifies the model provider as the source.");
     else if (details.rate_limit_source === "openrouter") parts.push("OpenRouter supplied platform rate-limit headers.");
     else if (details.rate_limit_source === "unknown") parts.push("The response did not identify the rate-limit source.");
@@ -814,7 +819,10 @@
     $("provider-sidebar-status").textContent = provider.disabled ? "Check account" : provider.configured ? "Free models" : "Not connected";
     $("provider-source-label").textContent = provider.key_source === "environment" ? "The key is managed in the server environment. Change it there and restart the server to replace it." : provider.key_source === "session" ? "A key is held in local server memory until restart. Its value is never returned to this page." : "Add a key for this local server session. Nothing is saved to browser storage.";
     if (provider.disabled) $("provider-source-label").textContent = "A provider reported a nonzero cost. Further AI requests are disabled. Check the provider account before reconnecting or restarting the server.";
-    if (!state.providerPolicyDirty) $("provider-zdr").checked = Boolean(provider.require_zdr);
+    if (!state.providerPolicyDirty) {
+      $("provider-zdr").checked = Boolean(provider.require_zdr);
+      $("provider-response-mode").value = provider.response_mode === "prompt" ? "prompt" : "schema";
+    }
     $("provider-budget-label").textContent = `App limit: up to ${number(provider.daily_limit)} model calls per day. Free model availability and provider limits may vary. Saving settings makes no model request.`;
     $("provider-save").lastElementChild.textContent = provider.configured ? "Save settings" : "Use this key";
     updateWorkflowControls();
@@ -824,7 +832,7 @@
     try {
       const response = await request("/api/provider"), data = await response.json();
       if (version !== state.providerVersion) return;
-      state.provider = { configured: Boolean(data.configured), key_source: data.key_source, model: data.model, free_only: data.free_only, privacy: data.privacy, daily_limit: data.daily_limit, require_zdr: Boolean(data.require_zdr), disabled: Boolean(data.disabled) };
+      state.provider = { configured: Boolean(data.configured), key_source: data.key_source, model: data.model, free_only: data.free_only, privacy: data.privacy, daily_limit: data.daily_limit, require_zdr: Boolean(data.require_zdr), response_mode: data.response_mode, disabled: Boolean(data.disabled) };
       renderProvider();
     } catch (error) {
       if (version !== state.providerVersion) return;
@@ -843,7 +851,7 @@
     const key = $("provider-key").value.trim();
     if (!clear && !key && !state.provider?.configured) { providerMessage("Paste an OpenRouter key to connect free model analysis.", true); return; }
     state.providerSaving = true; updateWorkflowControls(); providerMessage("Updating local server settings...");
-    const payload = { require_zdr: $("provider-zdr").checked };
+    const payload = { require_zdr: $("provider-zdr").checked, response_mode: $("provider-response-mode").value };
     if (clear) payload.clear = true;
     else if (key) payload.api_key = key;
     $("provider-key").value = "";
@@ -1113,6 +1121,15 @@
       return;
     }
     const container = $("analysis-report"), scope = report.scope || {}, ratings = report.rating_summary || {};
+    const latestAttempt = (state.automation?.jobs || []).find((job) => job.kind === "analysis" && job.options?.dataset === scope.dataset && (job.options?.asin || "") === (scope.asin || ""));
+    if (latestAttempt?.status === "failed" && latestAttempt.options?.analysis_method === "openrouter" && Date.parse(latestAttempt.created_at) > Date.parse(report.generated_at)) {
+      const warning = node("div", "report-stale"), copy = node("div");
+      const failure = latestAttempt.result?.error_code === "unavailable" && !latestAttempt.result?.diagnostics?.routing_reason ? "No compatible free route was available; the response did not identify why." : latestAttempt.detail || "The AI request did not finish.";
+      copy.append(node("strong", "", "The latest AI attempt failed"), node("p", "", failure), node("p", "", `No new AI report was saved. The report below is the saved ${report.method_label || report.method} from ${timeLabel(report.generated_at)}.`));
+      const diagnostics = describeProviderDiagnostics(latestAttempt.result?.diagnostics);
+      if (diagnostics) copy.append(node("p", "", diagnostics));
+      warning.append(icon("info"), copy); container.append(warning);
+    }
     if (data.stale) {
       const warning = node("div", "report-stale"); warning.append(icon("info"), node("p", "", "Reviews have changed since this report was generated. Run analysis again to update the findings.")); container.append(warning);
     }
@@ -1215,6 +1232,7 @@
       steps.push("A source match proves where a quote came from. It does not prove the interpretation. Read the linked reviews before relying on a conclusion.");
       if (router) {
         const provenance = report.provenance;
+        if (provenance?.response_mode) steps.push(provenance.response_mode === "prompt" ? "Response format: compatible JSON. The format was requested in the prompt and validated locally, without requiring provider-enforced JSON support." : "Response format: provider-enforced JSON, followed by the same local validation.");
         steps.push(provenance ? `Recorded request policy: free-only routing, training use denied, zero data retention ${provenance.require_zdr === true ? "required" : "not required"}.` : "This older report did not record its privacy settings. Current settings do not establish which settings produced a past report.");
         steps.push("Validated chunks are cached locally. An unchanged run can reuse them. The plan shows calls still needed; report generation usage describes the saved report's original run. Failed requests are not retried automatically.");
       }
@@ -1312,6 +1330,7 @@
   $("provider-clear").addEventListener("click", (event) => saveProvider(event, true));
   $("provider-check").addEventListener("click", checkProviderQuota);
   $("provider-zdr").addEventListener("change", () => { state.providerPolicyDirty = true; });
+  $("provider-response-mode").addEventListener("change", () => { state.providerPolicyDirty = true; });
   $("research-form").addEventListener("submit", startResearch);
   $("research-product").addEventListener("change", () => { $("research-consent").checked = false; messageAt("research-form-error", ""); updateWorkflowControls(); renderResearch(); });
   $("research-question").addEventListener("input", () => { $("research-consent").checked = false; messageAt("research-form-error", ""); updateWorkflowControls(); });

@@ -20,6 +20,8 @@ QUOTA_ENDPOINT = "https://openrouter.ai/api/v1/key"
 MODEL = "openrouter/free"
 MAX_BYTES = 1024 * 1024
 RESPONSE_BUDGET_SECONDS = 120
+RESPONSE_MODES = {"prompt", "schema"}
+ROUTING_REASONS = {"privacy_policy", "required_parameters", "model_unavailable", "region_policy", "no_matching_endpoint"}
 
 
 class ProviderError(AnalysisError):
@@ -37,6 +39,9 @@ def public_diagnostics(value):
     if not isinstance(value, Mapping):
         return {}
     safe = {}
+    reason = value.get("routing_reason")
+    if isinstance(reason, str) and reason in ROUTING_REASONS:
+        safe["routing_reason"] = reason
     source = value.get("rate_limit_source")
     if isinstance(source, str) and source in {"openrouter", "provider", "unknown"}:
         safe["rate_limit_source"] = source
@@ -51,6 +56,22 @@ def public_diagnostics(value):
 
 def _error_diagnostics(status, failure=None, headers=None, http_status=None):
     safe = {"error_status": status, "http_status": http_status}
+    if status in (400, 404, 503) and isinstance(failure, Mapping):
+        message = failure.get("message")
+        if isinstance(message, str) and len(message) <= 4096:
+            message = message.casefold()
+            # Retain only a fixed category, never the upstream message itself.
+            if message.startswith("no endpoints found"):
+                reason = "no_matching_endpoint"
+                if any(term in message for term in ("data policy", "privacy", "zero data retention", "zdr")):
+                    reason = "privacy_policy"
+                elif any(term in message for term in ("parameters", "response_format", "structured output", "tool_choice")):
+                    reason = "required_parameters"
+                elif any(term in message for term in ("region", "location")):
+                    reason = "region_policy"
+                safe["routing_reason"] = reason
+            elif message.startswith(("no available models", "model not found", "no such model")):
+                safe["routing_reason"] = "model_unavailable"
     if status != 429:
         return public_diagnostics(safe)
     safe["rate_limit_source"] = "unknown"
@@ -117,8 +138,20 @@ class _NoRedirect(request.HTTPRedirectHandler):
         return None
 
 
-def chat_payload(messages, *, schema=None, tools=None, require_tool=False, max_tokens=2500, require_zdr=False):
+def chat_payload(messages, *, schema=None, tools=None, require_tool=False, max_tokens=2500, require_zdr=False, response_mode="schema"):
     """Build the same credential-free payload for planning and transmission."""
+    if not isinstance(response_mode, str) or response_mode not in RESPONSE_MODES:
+        raise ProviderError("Choose a supported response format.", code="configuration")
+    if schema is not None and response_mode == "prompt":
+        instruction = ("Return only JSON matching the following response schema. The application validates every field "
+                       "and source reference locally; invalid output will be rejected.\n" + json.dumps(schema, ensure_ascii=False))
+        if not isinstance(messages, list) or any(not isinstance(item, Mapping) for item in messages):
+            raise ProviderError("The model conversation is invalid.", code="invalid_request")
+        messages = [dict(item) for item in messages]
+        if messages and messages[0].get("role") == "system" and isinstance(messages[0].get("content"), str):
+            messages[0]["content"] += "\n\n" + instruction
+        else:
+            messages.insert(0, {"role": "system", "content": instruction})
     payload = {"model": MODEL, "messages": messages, "stream": False, "max_tokens": max_tokens,
                "reasoning": {"enabled": False},
                "provider": {"require_parameters": True, "data_collection": "deny",
@@ -126,7 +159,7 @@ def chat_payload(messages, *, schema=None, tools=None, require_tool=False, max_t
                "plugins": [{"id": "context-compression", "enabled": False}]}
     if require_zdr:
         payload["provider"]["zdr"] = True
-    if schema is not None:
+    if schema is not None and response_mode == "schema":
         payload["response_format"] = {"type": "json_schema", "json_schema": {
             "name": "reviewdesk_result", "strict": True, "schema": schema}}
     if tools is not None:
@@ -142,6 +175,7 @@ class ProviderRegistry:
         self._quota_lock = threading.Lock()
         self._session_key = ""
         self._require_zdr = True
+        self._response_mode = "prompt"
         self._disabled = False
         self._lock = threading.RLock()
 
@@ -158,13 +192,16 @@ class ProviderRegistry:
         key, source = self._key()
         return {"provider": "openrouter", "configured": bool(key) and not self._disabled, "key_source": source,
                 "model": MODEL, "free_only": True, "privacy": "deny_training",
-                "daily_limit": 50, "require_zdr": self._require_zdr, "disabled": self._disabled}
+                "daily_limit": 50, "require_zdr": self._require_zdr, "response_mode": self._response_mode,
+                "disabled": self._disabled}
 
     def configure(self, payload):
-        if not isinstance(payload, dict) or set(payload) - {"api_key", "clear", "require_zdr"}:
+        if not isinstance(payload, dict) or set(payload) - {"api_key", "clear", "require_zdr", "response_mode"}:
             raise ProviderError("Supply a session API key or clear the saved session key.", code="configuration")
         if "require_zdr" in payload and not isinstance(payload["require_zdr"], bool):
             raise ProviderError("Zero data retention must be true or false.", code="configuration")
+        if "response_mode" in payload and (not isinstance(payload["response_mode"], str) or payload["response_mode"] not in RESPONSE_MODES):
+            raise ProviderError("Choose compatible JSON or provider-enforced JSON.", code="configuration")
         if "api_key" in payload and "clear" in payload:
             raise ProviderError("Choose either a session key or clear, not both.", code="configuration")
         if "clear" in payload and payload["clear"] is not True:
@@ -173,7 +210,7 @@ class ProviderRegistry:
         if key is not None and (not isinstance(key, str) or not key.strip()
                                 or len(key) > 512 or any(ord(char) < 33 or ord(char) > 126 for char in key.strip())):
             raise ProviderError("Enter a nonempty API key without whitespace or control characters.", code="configuration")
-        if not payload or (key is None and "clear" not in payload and "require_zdr" not in payload):
+        if not payload or (key is None and not {"clear", "require_zdr", "response_mode"}.intersection(payload)):
             raise ProviderError("Supply a session API key or clear the saved session key.", code="configuration")
         with self._lock:
             if "api_key" in payload:
@@ -187,6 +224,8 @@ class ProviderRegistry:
                 self._session_key = ""
             if "require_zdr" in payload:
                 self._require_zdr = payload["require_zdr"]
+            if "response_mode" in payload:
+                self._response_mode = payload["response_mode"]
         return self.public()
 
     def _request(self, payload, key, *, cancelled=None):
@@ -351,7 +390,7 @@ class ProviderRegistry:
         if not isinstance(require_tool, bool) or (require_tool and not tools):
             raise ProviderError("Required tool selection needs available tools.", code="invalid_request")
         payload = chat_payload(messages, schema=schema, tools=tools, require_tool=require_tool,
-                               max_tokens=max_tokens, require_zdr=self._require_zdr)
+                               max_tokens=max_tokens, require_zdr=self._require_zdr, response_mode=self._response_mode)
         try:
             if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > MAX_BYTES:
                 raise ProviderError("The model request is too large.", code="invalid_request")

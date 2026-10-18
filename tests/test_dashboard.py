@@ -364,6 +364,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(public["key_source"], "none")
         self.assertFalse(public["configured"])
         self.assertTrue(public["free_only"])
+        self.assertEqual(public["response_mode"], "prompt")
         status, _, content = self.post_json("/api/provider", {"api_key": "SYNTHETIC-PRIVATE-KEY", "require_zdr": True})
         self.assertEqual(status, 200, content)
         public = json.loads(content)
@@ -373,6 +374,11 @@ class DashboardTests(unittest.TestCase):
         status, _, content = self.post_json("/api/provider", {"require_zdr": False})
         self.assertEqual(status, 200, content)
         self.assertFalse(json.loads(content)["require_zdr"])
+        status, _, content = self.post_json("/api/provider", {"response_mode": "schema"})
+        self.assertEqual(status, 200, content)
+        self.assertEqual(json.loads(content)["response_mode"], "schema")
+        self.assertFalse(json.loads(content)["require_zdr"])
+        self.assertEqual(self.get_json("/api/provider")["response_mode"], "schema")
         capabilities = self.get_json("/api/automation")["capabilities"]
         self.assertTrue(capabilities["openrouter_configured"])
         self.assertEqual(capabilities["openrouter_model"], "openrouter/free")
@@ -393,7 +399,7 @@ class DashboardTests(unittest.TestCase):
         for headers, expected in attempts:
             status, _, content = self.request("/api/provider", method="POST", body=payload, headers=headers)
             self.assertEqual(status, expected, content)
-        for options in [{}, {"api_key": ""}, {"api_key": "x", "clear": True}, {"require_zdr": 1}, {"model": "paid-model"}, {"clear": False}]:
+        for options in [{}, {"api_key": ""}, {"api_key": "x", "clear": True}, {"require_zdr": 1}, {"model": "paid-model"}, {"clear": False}, {"response_mode": []}, {"response_mode": "auto"}]:
             status, _, content = self.post_json("/api/provider", options)
             self.assertEqual(status, 400, content)
         for body in [b'{"api_key":"one","api_key":"two"}', b'{"require_zdr":NaN}', b" " * 16385]:
