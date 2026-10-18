@@ -187,8 +187,8 @@ class EngineTests(unittest.TestCase):
         row = {**review(), "sent_title": "", "sent_body": "The battery lasts all evening."}
         citation = {"key": "r1", "quote": row["sent_body"]}
         valid = {"answer": "A cited battery observation.", "evidence": [citation], "limitations": []}
-        for changes in [{"answer": "x" * 1201}, {"limitations": ["x" * 161]},
-                        {"limitations": ["A limit"] * 3}, {"evidence": [citation] * 5}]:
+        for changes in [{"answer": "x" * 2401}, {"limitations": ["x" * 301]},
+                        {"limitations": ["A limit"] * 7}, {"evidence": [citation] * 9}]:
             with self.subTest(changes=changes), self.assertRaises(ProviderError) as caught:
                 LLMEngine._validate_answer({**valid, **changes}, {"r1": row})
             self.assertEqual(caught.exception.code, "report_format")
@@ -312,6 +312,10 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(first["scope"]["partial"])
         self.assertFalse(first["scope"]["analysis_complete"])
         self.assertEqual(first["pause_reason"]["code"], "rate_limit")
+        waiting = self.engine().analyse(rows, dataset="workspace", asin="", depth="deep")
+        self.assertEqual(waiting["pause_reason"]["code"], "cooldown")
+        self.assertEqual(waiting["usage"]["calls"], 0)
+        self.now[0] += 31
         second = self.engine().analyse(rows, dataset="workspace", asin="", depth="deep")
         self.assertTrue(second["scope"]["analysis_complete"])
         self.assertGreater(second["usage"]["cached_chunks"], 0)
@@ -365,7 +369,7 @@ class EngineTests(unittest.TestCase):
         sent = []
         engine = self.engine(lambda payload: sent.append(payload) or response(tool_calls=calls))
         with self.assertRaises(AnalysisError):
-            engine.ask([review()], "Explain battery comments", dataset="workspace", asin="")
+            engine._ask_agent([review()], "Explain battery comments", dataset="workspace", asin="")
         self.assertEqual(len(sent), 1)
         self.assertNotIn("parallel_tool_calls", sent[0])
 
@@ -374,7 +378,7 @@ class EngineTests(unittest.TestCase):
         def forbidden(payload):
             raise AssertionError("A local statistics question must not call a model")
         engine = self.engine(forbidden)
-        result = engine.ask([review(), review(2, rating="")], "How many reviews are stored?", dataset="workspace", asin="")
+        result = engine._ask_agent([review(), review(2, rating="")], "How many reviews are stored?", dataset="workspace", asin="")
         self.assertEqual(result["method"], "local")
         self.assertIn("2 distinct", result["answer"])
         self.assertEqual(result["usage"]["calls"], 0)
@@ -450,7 +454,7 @@ class EngineTests(unittest.TestCase):
             tool = json.loads(payload["messages"][-1]["content"])["reviews"][0]
             return response(json.dumps({"answer": "The cited review describes battery life.",
                 "evidence": [next(iter(tool["body"]))], "limitations": ["Only one retrieved example."]}))
-        result = self.engine(agent).ask([review()], "What do reviews say about battery life?", dataset="workspace", asin="")
+        result = self.engine(agent)._ask_agent([review()], "What do reviews say about battery life?", dataset="workspace", asin="")
         self.assertEqual(result["evidence"][0]["review_id"], review()["review_id"])
         self.assertEqual(result["usage"]["calls"], 2)
         self.assertEqual(calls[0]["tool_choice"], "required")
@@ -468,18 +472,18 @@ class EngineTests(unittest.TestCase):
             with self.subTest(name=name):
                 transport = lambda payload: response(tool_calls=[{"id": "test", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}])
                 with self.assertRaises(AnalysisError):
-                    self.engine(transport).ask([review()], "Explain battery comments", dataset="workspace", asin="")
+                    self.engine(transport)._ask_agent([review()], "Explain battery comments", dataset="workspace", asin="")
         def unseen(payload):
             return response(json.dumps({"answer": "A claim without retrieval.", "evidence": [{"key": "r000001", "quote": "The battery lasts all evening."}], "limitations": []}))
         with self.assertRaises(AnalysisError):
-            self.engine(unseen).ask([review()], "Explain battery comments", dataset="workspace", asin="")
+            self.engine(unseen)._ask_agent([review()], "Explain battery comments", dataset="workspace", asin="")
         sent = []
         def repeated(payload):
             sent.append(payload)
             return response(tool_calls=[{"id": str(len(sent)), "type": "function", "function": {
                 "name": "get_stats", "arguments": "{}"}}])
         with self.assertRaisesRegex(AnalysisError, "repeated"):
-            self.engine(repeated).ask([review()], "Explain battery comments", dataset="workspace", asin="")
+            self.engine(repeated)._ask_agent([review()], "Explain battery comments", dataset="workspace", asin="")
         self.assertEqual(len(sent), 2)
 
     def test_agent_json_errors_are_safe_and_retrieval_truncation_is_explicit(self):
@@ -490,7 +494,7 @@ class EngineTests(unittest.TestCase):
                 return response(tool_calls=[{"id": "bad-json", "type": "function", "function": {
                     "name": "get_stats", "arguments": arguments}}])
             with self.subTest(arguments=arguments), self.assertRaises(AnalysisError) as caught:
-                self.engine(malformed).ask([review()], "Explain battery comments", dataset="workspace", asin="")
+                self.engine(malformed)._ask_agent([review()], "Explain battery comments", dataset="workspace", asin="")
             self.assertNotIn("PRIVATE-MALFORMED", str(caught.exception))
         sent = []
         def detail(payload):
@@ -503,7 +507,7 @@ class EngineTests(unittest.TestCase):
             self.assertTrue(tool["body_truncated"])
             return response(json.dumps({"answer": "A retrieved excerpt contains battery text.",
                 "evidence": [next(iter(tool["body"]))], "limitations": []}))
-        result = self.engine(detail).ask([review(review_body="Battery " + "x" * 6000)], "Explain battery comments", dataset="workspace", asin="")
+        result = self.engine(detail)._ask_agent([review(review_body="Battery " + "x" * 6000)], "Explain battery comments", dataset="workspace", asin="")
         self.assertEqual(result["scope"]["retrieved_truncated_reviews"], 1)
         self.assertEqual(result["scope"]["detail_body_limit"], 4000)
 
@@ -511,11 +515,11 @@ class EngineTests(unittest.TestCase):
         rows = [review(rating="1"), review(asin="B0TEST0002", rating="5"),
                 review(2, rating="3.5"), review(3, rating="")]
         engine = self.engine(lambda payload: self.fail("Local statistics must not call a provider"))
-        result = engine.ask(rows, "What is the average rating?", dataset="workspace", asin="")
+        result = engine._ask_agent(rows, "What is the average rating?", dataset="workspace", asin="")
         self.assertIn("3.50 across 1 rated", result["answer"])
         self.assertEqual(result["scope"]["rating_conflicts"], 1)
         self.assertTrue(any("conflicting" in text for text in result["limitations"]))
-        counts = engine.ask(rows, "Rating distribution", dataset="workspace", asin="")
+        counts = engine._ask_agent(rows, "Rating distribution", dataset="workspace", asin="")
         self.assertIn("3.5 stars: 1", counts["answer"])
         self.assertIn("Unrated or conflicting: 2", counts["answer"])
 
@@ -538,7 +542,7 @@ class EngineTests(unittest.TestCase):
                     "evidence": [next(key for key, text in item["body"].items() if "battery concern" in text)], "limitations": []}))
             return response(tool_calls=[{"id": str(len(sent)), "type": "function", "function": {
                 "name": name, "arguments": json.dumps(arguments)}}])
-        result = self.engine(agent).ask(rows, "Investigate this product's battery concern.", dataset="workspace", asin="B0TEST0001")
+        result = self.engine(agent)._ask_agent(rows, "Investigate this product's battery concern.", dataset="workspace", asin="B0TEST0001")
         self.assertEqual(result["usage"]["calls"], 3)
         self.assertIn("battery concern", result["evidence"][0]["quote"])
         for private in ("PRIVATE-AUTHOR", "PRIVATE-ORIGINAL-ID", "https://www.amazon.in"):

@@ -17,11 +17,13 @@ The intended product direction is a hosted app that anyone can use. See the [pub
 - The engine separates short writing preferences from the hard report limits documented in the README. Exact source checks and the 1,000-token output ceiling remain in force.
 - A live compatible-mode 100-review report on engine 8 completed in about 26 seconds using one request, with 12,276 input tokens, 690 output tokens and a provider-reported cost of $0.00. It covered all 103 stored text segments, saved and displayed six themes. Every displayed passage was checked against its stored source, and each theme's cited review and rating counts matched distinct source IDs. Some model interpretations and selected snippets still need human review; source matching does not prove semantic support or topic prevalence.
 - Optional Windows Credential Manager storage restores a remembered key and its AI preferences after restart. Synthetic tests cover opt-in, opt-out, replacement, restoration, forgetting, failed writes and unreadable entries. A real Windows vault round trip is tested separately with a unique synthetic credential and cleanup. The sidebar exposes the last checked provider allowance separately from local accounting.
-- Automated tests use fictional reviews and fake model responses. They cover pagination recovery, duplicate handling, transactions, cancellation, validation, privacy boundaries, cache reuse and request budgets. CI runs on Windows and Linux with Python 3.10 and 3.13.
+- Research now retrieves related passages locally before optional interpretation. Focused answers use at most one model request, with source-checked cache reuse. The deeper tool agent is an explicit option. A provider or validation failure returns labelled local evidence, not an accepted AI answer. Durable rate-limit backoff prevents repeated attempts during the wait. A live price question searched 100 stored reviews, selected 12 excerpts and returned a source-checked answer in one request, with 2,169 input tokens, 164 output tokens and a provider-reported cost of $0.00. Its interpretation still needs human review. The interface labels sampled context and AI interpretation, and price questions always disclose that reviews do not establish current market prices.
+- Repeating that live research question after restarting the server reused the revalidated answer with zero new model calls. The remembered key also restored without re-entry. Local-only retrieval returned related source excerpts without contacting a model.
+- All 328 automated tests pass, with the real Windows vault check skipped by default and verified separately. Tests use fictional reviews and fake model responses. They cover pagination recovery, duplicate handling, transactions, cancellation, validation, privacy boundaries, cache reuse and request budgets. CI runs on Windows and Linux with Python 3.10 and 3.13.
 
 Live collection pins Playwright to the version used in this workspace. The offline app needs only Python's standard library. Recheck the pinned dependency and its browser build before a release; a pin makes updates deliberate, not permanently safe.
 
-Live research-agent retrieval and a full-library LLM report remain unverified. A successful model response does not establish that every interpretation is correct.
+Live tool-agent retrieval and a full-library LLM report remain unverified. A successful model response does not establish that every interpretation is correct.
 
 ## The analysis flow
 
@@ -43,7 +45,7 @@ flowchart TD
 
 For 100 stored reviews, broader coverage can fit in one batch. Long reviews are split without discarding text. The model is asked for three themes and two passages per theme, with hard limits of eight themes and eight passages. Reading all text does not mean every issue will appear in the summary. Theme counts show distinct cited reviews, not measured prevalence. Multiple passages from one review count once. Rating statistics cover the selected stored collection independently of text coverage.
 
-The scraper does not use an LLM to navigate Amazon. The research assistant uses bounded read-only local tools only when a question needs evidence. Recognized count and rating questions stay local. More agents do not automatically improve either workflow.
+The scraper does not use an LLM to navigate Amazon. Research retrieves locally first and normally uses one optional interpretation call. The bounded tool agent is selected explicitly for deeper investigation. Recognized count and rating questions stay local. More agents do not automatically improve either workflow.
 
 ## Verify a release
 

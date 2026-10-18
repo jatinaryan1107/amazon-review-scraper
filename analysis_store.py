@@ -114,6 +114,25 @@ class AnalysisStore:
             used = connection.execute("SELECT COUNT(*) FROM attempts WHERE day=?", (day,)).fetchone()[0]
         return max(0, 50 - used)
 
+    def retry_at(self):
+        """Retain provider backoff across restarts without reserving an attempt."""
+        current = self.clock()
+        with self._connection() as connection:
+            rows = connection.execute("SELECT started_at,usage FROM attempts WHERE status='failed' ORDER BY started_at DESC LIMIT 50").fetchall()
+        return self._retry_at(rows, current)
+
+    @staticmethod
+    def _retry_at(rows, current):
+        blocked = []
+        for row in rows:
+            try:
+                value = _loads(row["usage"]).get("retry_at")
+                if type(value) is int and current < value <= row["started_at"] + 86700:
+                    blocked.append(value)
+            except (ValueError, TypeError, AttributeError, RecursionError):
+                continue
+        return max(blocked, default=None)
+
     def reserve_attempt(self, key, *, cancelled=None):
         self._validate_key(key)
         while True:
@@ -121,6 +140,11 @@ class AnalysisStore:
             with self._lock, self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 current = self.clock()
+                failures = connection.execute("SELECT started_at,usage FROM attempts WHERE status='failed' ORDER BY started_at DESC LIMIT 50").fetchall()
+                retry_at = self._retry_at(failures, current)
+                if retry_at:
+                    raise ProviderError("Free AI is cooling down after a provider limit. Local evidence remains available.",
+                                        code="cooldown", retry_after=math.ceil(retry_at - current))
                 date = datetime.fromtimestamp(current, timezone.utc)
                 day = date.date().isoformat()
                 used = connection.execute("SELECT COUNT(*) FROM attempts WHERE day=?", (day,)).fetchone()[0]
@@ -135,8 +159,18 @@ class AnalysisStore:
                     return identity
             self.sleep(min(wait, 0.1))
 
-    def finish_attempt(self, identity, *, success=False, usage=None):
-        safe_usage = usage or {}
+    def finish_attempt(self, identity, *, success=False, usage=None, error=None):
+        safe_usage = dict(usage or {})
+        if isinstance(error, ProviderError) and error.code == "rate_limit":
+            delay = error.retry_after
+            if type(delay) not in {int, float} or not math.isfinite(delay) or not 0 <= delay <= 86400:
+                delay = 30
+            retry_at = math.ceil(self.clock() + delay)
+            details = error.diagnostics
+            reset = details.get("reset_at")
+            if details.get("remaining") == 0 and type(reset) is int and self.clock() < reset <= self.clock() + 86400:
+                retry_at = max(retry_at, reset)
+            safe_usage.update(error_code="rate_limit", retry_at=retry_at)
         encoded = json.dumps(safe_usage, ensure_ascii=False, allow_nan=False)
         if len(encoded) > 4096:
             raise ValueError("The analysis usage record is too large.")

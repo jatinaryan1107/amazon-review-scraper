@@ -80,6 +80,12 @@ def _error_diagnostics(status, failure=None, headers=None, http_status=None):
         return public_diagnostics(safe)
     safe["rate_limit_source"] = "unknown"
     metadata = failure.get("metadata") if isinstance(failure, Mapping) else None
+    nested_headers = metadata.get("headers") if isinstance(metadata, Mapping) else None
+    if not isinstance(nested_headers, Mapping):
+        nested_headers = {}
+    provider_name = metadata.get("provider_name") if isinstance(metadata, Mapping) else None
+    if isinstance(provider_name, str) and provider_name.strip() and len(provider_name) <= 100:
+        safe["rate_limit_source"] = "provider"
     provider_code = metadata.get("provider_code") if isinstance(metadata, Mapping) else None
     if (type(provider_code) is int or isinstance(provider_code, str)) and provider_code != "":
         safe["rate_limit_source"] = "provider"
@@ -89,6 +95,10 @@ def _error_diagnostics(status, failure=None, headers=None, http_status=None):
     for header, field in [("X-RateLimit-Limit", "limit"), ("X-RateLimit-Remaining", "remaining"),
                           ("X-RateLimit-Reset", "reset_at")]:
         raw = headers.get(header)
+        if not isinstance(raw, str):
+            raw = nested_headers.get(header)
+        if type(raw) is int:
+            raw = str(raw)
         if not isinstance(raw, str) or not re.fullmatch(r"[0-9]{1,13}", raw):
             continue
         number = int(raw)
@@ -107,7 +117,13 @@ def _raise_provider_error(status, *, failure=None, headers=None, http_status=Non
             503: "unavailable"}.get(status, "invalid_response") if type(status) is int else "invalid_response"
     retry_after = None
     try:
-        raw = (headers or {}).get("Retry-After", "")
+        raw = (headers or {}).get("Retry-After")
+        if raw is None and isinstance(failure, Mapping):
+            metadata = failure.get("metadata")
+            nested = metadata.get("headers") if isinstance(metadata, Mapping) else None
+            raw = nested.get("Retry-After", "") if isinstance(nested, Mapping) else ""
+        if isinstance(raw, bool):
+            raise ValueError("Invalid retry hint")
         number = float(raw)
         if math.isfinite(number) and 0 <= number <= 86400:
             retry_after = number

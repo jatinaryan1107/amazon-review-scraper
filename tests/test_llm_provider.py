@@ -242,6 +242,19 @@ class ProviderTests(unittest.TestCase):
             "rate_limit_source": "provider", "provider_code": 429})
         self.assertNotIn(KEY, json.dumps(caught.exception.diagnostics))
 
+    def test_nested_rate_headers_and_provider_name_are_classified_without_returning_raw_metadata(self):
+        payload = {"error": {"code": 429, "message": KEY, "metadata": {"provider_name": "Test provider",
+            "raw_error": KEY, "headers": {"X-RateLimit-Limit": 20, "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": "1800014400000", "Retry-After": "12", "Authorization": KEY}}}}
+        with patch("llm_provider.request.build_opener") as build:
+            build.return_value.open.return_value = io.BytesIO(json.dumps(payload).encode())
+            with self.assertRaises(ProviderError) as caught:
+                self.registry().chat([{"role": "user", "content": "Synthetic"}])
+        self.assertEqual(caught.exception.retry_after, 12)
+        self.assertEqual(caught.exception.diagnostics, {"http_status": 200, "error_status": 429,
+            "rate_limit_source": "provider", "limit": 20, "remaining": 0, "reset_at": 1800014400})
+        self.assertNotIn(KEY, str(caught.exception) + json.dumps(caught.exception.diagnostics))
+
     def test_account_check_uses_fixed_get_and_exposes_only_request_counters(self):
         raw = {"data": {"label": KEY, "hash": KEY, "limit_remaining": 123,
             "free_model_daily_requests": {"used": 5, "limit": 50, "remaining": 45}}}

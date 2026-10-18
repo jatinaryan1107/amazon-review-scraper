@@ -59,7 +59,7 @@ class FakeLLM:
         report["scope"].update(analysis_complete=complete, full_coverage=complete and depth == "deep")
         return report
 
-    def ask(self, rows, question, *, dataset, asin, cancelled, on_progress):
+    def ask(self, rows, question, *, dataset, asin, cancelled, on_progress, allow_external=False, strategy="focused"):
         self.calls.append(("research", question))
         if self.failure:
             raise self.failure
@@ -678,17 +678,17 @@ class JobManagerTests(unittest.TestCase):
         self.assertNotIn("api_key", finished["result"])
         self.assertNotIn("must-not-be-saved", json.dumps(finished))
         self.assertIsNone(service.latest_report("workspace")["report"])
-        with self.assertRaisesRegex(ValueError, "Configure"):
-            service.submit({"kind": "research", "question": "What battery complaints recur?"})
-        with self.assertRaisesRegex(ValueError, "Configure"):
-            service.submit({"kind": "research", "question": "What battery complaints recur?", "allow_external": True})
+        for external in (False, True):
+            job = service.submit({"kind": "research", "question": "What battery complaints recur?", "allow_external": external})
+            self.assertEqual(self.wait_job(service, job["id"])["status"], "succeeded")
 
     def test_research_options_and_answer_size_are_bounded(self):
         engine = FakeLLM()
         service = self.router_service(engine=engine, autostart=False)
         for payload in [{"question": ""}, {"question": "q" * 1501}, {"question": []},
                         {"question": "How many reviews?", "dataset": []},
-                        {"question": "How many reviews?", "allow_external": 1}]:
+                        {"question": "How many reviews?", "allow_external": 1},
+                        {"question": "A question", "research_mode": []}, {"question": "A question", "research_mode": "unbounded"}]:
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 service.submit({"kind": "research", **payload})
         engine.ask = Mock(return_value={"answer": "a" * 16001, "evidence": [], "steps": []})

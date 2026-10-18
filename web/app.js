@@ -571,9 +571,9 @@
     const local = isLocalQuestion($("research-question").value);
     $("research-consent").disabled = !routerReady || local;
     $("research-consent-wrap").hidden = local;
-    $("research-help").textContent = local ? "This exact statistics question runs locally. No model call or API key is needed." : "Exact count, average rating, and rating distribution prompts can run locally. Filtered questions and other research use OpenRouter with your permission.";
+    $("research-help").textContent = local ? "This exact statistics question runs locally. No model call or API key is needed." : "Matching passages are found locally first. Without sharing, you get local evidence only. Optional focused AI uses at most one call; agent investigation uses up to four. If AI is unavailable, local sources stay available.";
     $("research-provider-note").hidden = routerReady;
-    $("research-provider-note").firstElementChild.textContent = router.disabled ? "AI research is disabled after a cost signal. Check AI settings. Local statistics questions still work." : "Local questions work now. Add an OpenRouter key for model research.";
+    $("research-provider-note").firstElementChild.textContent = router.disabled ? "AI is disabled after a cost signal. Local statistics and evidence search still work." : "Local evidence search works without a key. Add OpenRouter for optional AI interpretation.";
     const providerBusy = busy && (active.kind === "research" || active.options?.analysis_method === "openrouter");
     $("provider-save").disabled = state.providerSaving || state.providerChecking || providerBusy;
     $("provider-key").disabled = state.providerSaving || state.providerChecking || providerBusy || state.provider?.key_source === "environment";
@@ -823,6 +823,7 @@
     const local = Number.isInteger(result?.app_daily_remaining) ? ` Reviewdesk budget: ${number(result.app_daily_remaining)} attempts left.` : "";
     $("allowance-detail").textContent = result && freshDay ? `Checked ${new Date(result.checked_at * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}.${local} Refresh for the latest count.` : state.provider?.configured ? "Refresh to check OpenRouter. This uses no model requests." : "Connect a key to check remaining requests.";
     if (state.providerQuotaError) $("allowance-detail").textContent = "The last check failed. Any count above is from an earlier check. Refresh to try again; no model call was made.";
+    if (state.provider?.retry_at && Date.now() < state.provider.retry_at * 1000) $("allowance-detail").textContent += ` Free AI paused until ${new Date(state.provider.retry_at * 1000).toLocaleTimeString()}; local evidence still works.`;
   }
   function renderProvider() {
     const provider = state.provider;
@@ -847,7 +848,7 @@
     try {
       const response = await request("/api/provider"), data = await response.json();
       if (version !== state.providerVersion) return;
-      state.provider = { configured: Boolean(data.configured), key_source: data.key_source, model: data.model, free_only: data.free_only, privacy: data.privacy, daily_limit: data.daily_limit, require_zdr: Boolean(data.require_zdr), response_mode: data.response_mode, disabled: Boolean(data.disabled), remember_key: Boolean(data.remember_key), remember_available: Boolean(data.remember_available), storage_error: Boolean(data.storage_error) };
+      state.provider = { configured: Boolean(data.configured), key_source: data.key_source, model: data.model, free_only: data.free_only, privacy: data.privacy, daily_limit: data.daily_limit, require_zdr: Boolean(data.require_zdr), response_mode: data.response_mode, disabled: Boolean(data.disabled), remember_key: Boolean(data.remember_key), remember_available: Boolean(data.remember_available), storage_error: Boolean(data.storage_error), retry_at: data.retry_at };
       state.providerQuota = data.quota_snapshot ? {...data.quota_snapshot, app_daily_remaining: data.app_daily_remaining} : null;
       renderProvider();
     } catch (error) {
@@ -1036,7 +1037,7 @@
     if (facts.length) section.append(node("p", "", facts.join(" · ")));
     const models = Array.isArray(usage?.models) ? [...new Set(usage.models)] : [];
     if (models.length) section.append(node("p", "usage-models", `Model${models.length === 1 ? "" : "s"} returned: ${models.join(", ")}`));
-    else if (model) section.append(node("p", "usage-models", `Configured model route: ${model}`));
+    else if (model) section.append(node("p", "usage-models", Number(usage?.cached_chunks) > 0 ? `Model used for the saved answer: ${model}` : `Configured model route: ${model}`));
     if (Number(usage?.calls) > 0) {
       const knownCost = typeof usage.cost === "number" && Number.isFinite(usage.cost) && usage.cost >= 0;
       section.append(node("p", "usage-models", knownCost ? `Provider-reported cost: $${usage.cost.toFixed(2)} USD` : "Provider cost was not reported."));
@@ -1049,9 +1050,7 @@
     if (!question) { messageAt("research-form-error", "Add a question about your stored reviews."); return; }
     if (question.length > 1500) { messageAt("research-form-error", "Keep the question within 1,500 characters."); return; }
     const local = isLocalQuestion(question), router = routerStatus();
-    if (!local && !router.configured) { messageAt("research-form-error", router.disabled ? "AI research is disabled after a cost signal. Check the provider account and AI settings. Exact local statistics questions still work." : "Set up OpenRouter in AI settings for this question, or use one of the exact local statistics prompts."); return; }
-    if (!local && !$("research-consent").checked) { messageAt("research-form-error", "Allow the question and selected review evidence to be sent to OpenRouter before starting model research."); return; }
-    const job = await createJob({ kind: "research", question, dataset: state.dataset, asin: $("research-product").value, allow_external: !local && $("research-consent").checked && router.configured }, "research-form-error");
+    const job = await createJob({ kind: "research", question, dataset: state.dataset, asin: $("research-product").value, research_mode: $("research-mode").value, allow_external: !local && $("research-consent").checked && router.configured }, "research-form-error");
     if (job) $("research-consent").checked = false;
     updateWorkflowControls(); renderResearch();
   }
@@ -1059,7 +1058,7 @@
     const result = job.result, card = node("article", "panel research-answer");
     const question = node("div", "research-question-line"); question.append(icon("message"), node("h3", "", job.options?.question || result?.question || "Review question")); card.append(question);
     const provenance = node("div", "research-answer-meta");
-    provenance.append(node("span", "badge", result?.method === "local" ? "LOCAL ANSWER" : job.status === "succeeded" ? "OPENROUTER FREE" : String(job.status).toUpperCase()), node("span", "", timeLabel(job.updated_at)));
+    provenance.append(node("span", "badge", result?.method === "local" ? "LOCAL STATISTICS" : result?.method === "local_evidence" ? "LOCAL EVIDENCE" : job.status === "succeeded" ? result.cache_hit ? "SAVED AI ANSWER" : "OPENROUTER FREE" : String(job.status).toUpperCase()), node("span", "", timeLabel(job.updated_at)));
     card.append(provenance);
     if (job.status !== "succeeded" || !result?.answer) {
       card.append(node("p", "job-error", job.detail || job.error || "This question could not be completed."));
@@ -1068,14 +1067,29 @@
         $("research-question").value = job.options?.question || ""; $("research-consent").checked = false;
         $("research-question").focus(); toast("Question restored. Check it and sharing consent before trying again.");
       }, "refresh"));
+      card.append(button("Find local evidence", "text-button", async () => {
+        await createJob({kind: "research", dataset: job.options.dataset, asin: job.options.asin || "", question: job.options.question, allow_external: false, research_mode: "focused"}, "research-form-error");
+      }, "search"));
       return card;
     }
+    if (result.method === "openrouter") card.append(node("p", "field-help", "AI interpretation of selected excerpts. Check the linked sources before relying on its conclusion."));
     card.append(node("p", "research-answer-text", result.answer));
+    if (result.notice?.message) {
+      const notice = node("div", "research-notice");
+      notice.append(node("strong", "", "AI unavailable; local evidence shown"), node("p", "", result.notice.message));
+      if (result.notice.retry_after != null) {
+        const retryAt = new Date(new Date(job.updated_at).getTime() + Math.ceil(Number(result.notice.retry_after)) * 1000);
+        notice.append(node("p", "", `AI can be tried after ${retryAt.toLocaleTimeString()}. No automatic retry was made.`));
+      }
+      card.append(notice);
+    }
     const usage = usageSummary(result.usage, result.method === "local" ? "" : result.model);
     if (usage.children.length) card.append(usage);
     const scope = result.scope || {};
     const scopeFacts = [];
     if (scope.total_reviews != null) scopeFacts.push(`${plural(scope.total_reviews, "stored review")}`);
+    if (scope.matched_reviews != null) scopeFacts.push(`${number(scope.matched_reviews)} local matches`);
+    if (scope.retrieved_reviews != null) scopeFacts.push(`${number(scope.retrieved_reviews)} selected for context`);
     if (scope.analysed_reviews != null) scopeFacts.push(`${number(scope.analysed_reviews)} examined`);
     if (scopeFacts.length) card.append(node("p", "research-coverage", scopeFacts.join(" · ")));
     const sources = Array.isArray(result.evidence) ? result.evidence : [];
@@ -1083,7 +1097,9 @@
       const evidence = node("div", "research-evidence"), title = node("h4", "", "Source reviews"); evidence.append(title);
       for (const source of sources.slice(0, 8)) {
         const entry = node("div", "evidence-card");
-        if (source.quote) entry.append(node("blockquote", "", source.quote));
+        const quotes = Array.isArray(source.quotes) && source.quotes.length ? source.quotes.slice(0, 8) : source.quote ? [source.quote] : [];
+        if (quotes.length > 1) entry.append(node("p", "muted", `${number(quotes.length)} passages from one review`));
+        for (const quote of quotes) entry.append(node("blockquote", "", quote));
         const open = button("Read source review", "text-button", () => openEvidence(source, job.options.dataset, open), "arrow");
         const footer = node("div", "evidence-source"); footer.append(node("code", "", source.asin), open); entry.append(footer); evidence.append(entry);
       }
@@ -1113,7 +1129,12 @@
       state.researchJobKey = activeKey;
       preserveJobFocus($("research-job"), () => $("research-job").replaceChildren(...(researchJob ? [jobCard(researchJob, true)] : [])));
     }
-    const jobs = (state.automation?.jobs || []).filter((job) => job.kind === "research" && !activeStatuses.has(job.status) && job.options?.dataset === state.dataset && (job.options?.asin || "") === $("research-product").value).slice(0, 5);
+    const seenQuestions = new Set();
+    const jobs = (state.automation?.jobs || []).filter((job) => job.kind === "research" && !activeStatuses.has(job.status) && job.options?.dataset === state.dataset && (job.options?.asin || "") === $("research-product").value).filter((job) => {
+      const question = String(job.options?.question || "").trim().toLowerCase().replace(/\s+/g, " ");
+      if (seenQuestions.has(question)) return false;
+      seenQuestions.add(question); return true;
+    }).slice(0, 5);
     const key = JSON.stringify([state.dataset, $("research-product").value, jobs]);
     if (state.researchRenderKey !== key) {
       state.researchRenderKey = key;

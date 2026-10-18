@@ -348,6 +348,11 @@ class LLMEngine:
 
     def _call(self, messages, schema, usage, key, *, cancelled=None, tools=None, require_tool=False):
         _cancel(cancelled)
+        policy = self.registry.public()
+        if policy.get("disabled"):
+            raise ProviderError("Free AI is disabled after a cost signal.", code="cost_guard")
+        if not policy.get("configured"):
+            raise ProviderError("Connect an OpenRouter key to use AI.", code="not_configured")
         identity = self.store.reserve_attempt(key, cancelled=cancelled)
         usage["calls"] += 1
         try:
@@ -366,7 +371,12 @@ class LLMEngine:
             if result["model"] not in usage["models"]:
                 usage["models"].append(result["model"])
             return result
+        except ProviderError as error:
+            usage["usage_available"], usage["cost"] = False, None
+            self.store.finish_attempt(identity, success=False, error=error)
+            raise
         except BaseException:
+            usage["usage_available"], usage["cost"] = False, None
             self.store.finish_attempt(identity, success=False)
             raise
 
@@ -508,12 +518,17 @@ class LLMEngine:
             report["limitations"].append("This report is partial. Resume to reuse validated chunks and process the remaining text.")
         return report
 
-    def ask(self, rows, question, *, dataset, asin, cancelled=None, on_progress=None):
+    def ask(self, rows, question, *, dataset, asin, allow_external=True, strategy="focused", cancelled=None, on_progress=None):
+        from research import ask_reviews
+        return ask_reviews(self, rows, question, dataset=dataset, asin=asin, allow_external=allow_external,
+                           strategy=strategy, cancelled=cancelled, on_progress=on_progress)
+
+    def _ask_agent(self, rows, question, *, dataset, asin, cancelled=None, on_progress=None, _usage_state=None):
         if not isinstance(question, str) or not question.strip() or len(question) > 1500:
             raise AnalysisError("Ask a question using 1 to 1,500 characters.")
         canonical, memberships, fingerprint, metadata = self._prepare(rows, dataset, asin)
         stats = self._stats(canonical, metadata)
-        usage, steps = self._usage(), []
+        usage, steps = self._usage() if _usage_state is None else _usage_state, []
         scope = {"dataset": dataset, "asin": asin, "total_reviews": len(canonical), **metadata}
         local_intent = _local_intent(question)
         if local_intent:
@@ -698,21 +713,26 @@ class LLMEngine:
         if not isinstance(value, dict) or set(value) != {"answer", "evidence", "limitations"}:
             raise ProviderError("The assistant answer did not match its required format.", code="report_format")
         answer, citations, limits = value["answer"], value["evidence"], value["limitations"]
-        if not isinstance(answer, str) or not answer.strip() or len(answer) > 1200 or not isinstance(citations, list) or not 1 <= len(citations) <= 4:
+        if not isinstance(answer, str) or not answer.strip() or len(answer) > 2400 or not isinstance(citations, list) or not 1 <= len(citations) <= 8:
             raise ProviderError("The assistant did not provide a bounded answer with review evidence.", code="report_format")
-        if not isinstance(limits, list) or len(limits) > 2 or any(not isinstance(item, str) or not item.strip() or len(item) > 160 for item in limits):
+        if not isinstance(limits, list) or len(limits) > 6 or any(not isinstance(item, str) or not item.strip() or len(item) > 300 for item in limits):
             raise ProviderError("The assistant returned invalid limitations.", code="report_format")
-        evidence, seen = [], set()
+        evidence, seen, sources = [], set(), {}
         for citation in citations:
             if not isinstance(citation, dict) or set(citation) != {"key", "quote"}:
                 raise ProviderError("The assistant returned an invalid citation.", code="evidence_reference")
             key, quote = citation["key"], citation["quote"]
-            if not isinstance(key, str) or key not in exposed or key in seen or not isinstance(quote, str) or not quote.strip() or len(quote) > 280:
+            if not isinstance(key, str) or key not in exposed or not isinstance(quote, str) or not quote.strip() or len(quote) > 280 or (key, quote) in seen:
                 raise ProviderError("The assistant cited unavailable or duplicate review evidence.", code="evidence_reference")
             row = exposed[key]
             if not any(quote in text for text in [*row.get("shown_titles", [row["sent_title"]]),
                                                  *row.get("shown_bodies", [row["sent_body"]])]):
                 raise ProviderError("The assistant quote was not found in its retrieved review excerpt.", code="evidence_quote")
-            seen.add(key)
-            evidence.append({"asin": row["asin"], "review_id": row["review_id"], "quote": quote})
+            seen.add((key, quote))
+            identity = row["review_id"]
+            if identity not in sources:
+                sources[identity] = {"asin": row["asin"], "review_id": identity, "quote": quote, "quotes": []}
+                evidence.append(sources[identity])
+            if quote not in sources[identity]["quotes"]:
+                sources[identity]["quotes"].append(quote)
         return answer.strip(), evidence, limits

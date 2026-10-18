@@ -508,7 +508,18 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(job["result"]["method"], "local")
         self.assertIn("15", job["result"]["answer"])
         self.assertIsNone(self.get_json("/api/analysis?dataset=demo")["report"])
-        self.assertEqual(self.post_json("/api/jobs", {"kind": "research", "question": "Which battery complaints recur?"})[0], 400)
+        status, _, content = self.post_json("/api/jobs", {"kind": "research", "dataset": "demo", "question": "Which battery complaints recur?"})
+        self.assertEqual(status, 202, content)
+        job_id = json.loads(content)["job"]["id"]
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            job = self.server.automation.get_job(job_id)
+            if job["status"] not in {"queued", "running", "cancelling"}:
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertEqual(job["result"]["method"], "local_evidence")
+        self.assertEqual(job["result"]["usage"]["calls"], 0)
         self.assertEqual(self.post_json("/api/jobs", {"kind": "analysis", "analysis_method": "openrouter", "allow_external": True})[0], 400)
 
     def test_http_provider_errors_do_not_echo_messages_or_unsafe_retry_values(self):
@@ -526,6 +537,34 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(json.loads(content)["code"], "provider_error")
         self.assertNotIn("retry_after", json.loads(content))
         self.assertNotIn("RAW-REQUEST-SECRET", content.decode())
+
+    def test_research_http_rate_limit_returns_sources_and_next_request_respects_cooldown(self):
+        sent = []
+        def limited(payload):
+            sent.append(payload)
+            raise ProviderError("RAW-PROVIDER-SECRET", code="rate_limit", retry_after=30)
+        registry = ProviderRegistry(environ={}, transport=limited)
+        registry.configure({"api_key": "SYNTHETIC-RESEARCH-KEY"})
+        self.server.automation._provider_registry = registry
+        for expected_calls, expected_reason in [(1, "rate_limit"), (0, "cooldown")]:
+            status, _, content = self.post_json("/api/jobs", {"kind": "research", "dataset": "demo",
+                "question": "What do reviewers say about battery?", "allow_external": True})
+            self.assertEqual(status, 202, content)
+            job_id = json.loads(content)["job"]["id"]
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                job = self.server.automation.get_job(job_id)
+                if job["status"] not in {"queued", "running", "cancelling"}:
+                    break
+                threading.Event().wait(0.01)
+            self.assertEqual(job["status"], "succeeded", job)
+            self.assertEqual(job["result"]["method"], "local_evidence")
+            self.assertEqual(job["result"]["notice"]["code"], expected_reason)
+            self.assertEqual(job["result"]["usage"]["calls"], expected_calls)
+            self.assertTrue(job["result"]["evidence"])
+            self.assertNotIn("RAW-PROVIDER-SECRET", json.dumps(job))
+        self.assertEqual(len(sent), 1)
+        self.assertIsInstance(self.get_json("/api/provider")["retry_at"], int)
 
     def test_openrouter_http_job_uses_a_fake_transport_and_reuses_its_validated_report(self):
         sent = []

@@ -45,6 +45,26 @@ class StoreTests(unittest.TestCase):
             self.store.reserve_attempt("b" * 64, cancelled=lambda: True)
         self.assertEqual(self.store.daily_remaining(), 0)
 
+    def test_rate_limit_backoff_survives_restart_and_reserves_no_attempt_during_wait(self):
+        identity = self.store.reserve_attempt("d" * 64)
+        self.store.finish_attempt(identity, error=ProviderError("private", code="rate_limit", retry_after=20))
+        reopened = AnalysisStore(self.path, clock=lambda: self.now[0])
+        self.assertEqual(reopened.retry_at(), self.now[0] + 20)
+        with self.assertRaises(ProviderError) as caught:
+            reopened.reserve_attempt("e" * 64)
+        self.assertEqual(caught.exception.code, "cooldown")
+        self.assertEqual(reopened.daily_remaining(), 49)
+        self.now[0] += 21
+        self.assertIsNone(reopened.retry_at())
+        reopened.reserve_attempt("e" * 64)
+        self.assertEqual(reopened.daily_remaining(), 48)
+
+    def test_reported_zero_remaining_honors_reset_but_malformed_backoff_is_not_trusted(self):
+        identity = self.store.reserve_attempt("f" * 64)
+        self.store.finish_attempt(identity, error=ProviderError("private", code="rate_limit", diagnostics={
+            "remaining": 0, "reset_at": int(self.now[0] + 120)}))
+        self.assertEqual(self.store.retry_at(), self.now[0] + 120)
+
     def test_incompatible_schema_is_rejected_before_any_mutation(self):
         wrong = self.path.parent / "wrong.sqlite3"
         with closing(sqlite3.connect(wrong)) as connection, connection:

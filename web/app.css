@@ -3781,6 +3781,8 @@ textarea:focus-visible{
 .ai-allowance strong{font-size:11px;font-weight:600;color:var(--text)}
 .ai-allowance p{font-size:10px;line-height:1.5;color:var(--muted);margin:4px 0 0}
 .ai-allowance .icon-button{width:25px;height:25px;flex-shrink:0}
+.research-notice{padding:14px 16px;border-radius:10px;background:var(--gold-soft);color:var(--text);margin:12px 0;font-size:12px}
+.research-notice p{margin:6px 0 0;line-height:1.6}
 .provider-quota-counts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}
 .provider-quota-counts dt{font-size:10px;color:var(--muted)}
 .provider-quota-counts dd{margin:4px 0 0;font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}

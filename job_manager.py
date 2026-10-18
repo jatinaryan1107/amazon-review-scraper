@@ -28,7 +28,9 @@ PROVIDER_MESSAGES = {
     "not_configured": "Add an OpenRouter key in Settings before using AI.",
     "invalid_request": "The AI request could not be accepted. Check the selected scope and settings.",
     "authorization": "OpenRouter could not authorize this request. Check the configured key.",
-    "rate_limit": "A rate limit blocked this request. The response did not identify which limit.",
+    "rate_limit": "The free AI service is limiting requests. Your daily allowance may still be available; local evidence remains usable.",
+    "cooldown": "Free AI is cooling down after a provider limit. Local evidence remains available. Try AI again after the displayed wait.",
+    "research_storage": "The local research cache or request ledger is unavailable. Related source reviews are shown; check the local data storage before another AI attempt.",
     "check_busy": "An account quota check is already running. Wait for its result.",
     "unavailable": "A compatible free model route is unavailable. The saved response does not identify why.",
     "budget": "The analysis call budget was reached. Completed chunks are saved.",
@@ -256,13 +258,20 @@ class AutomationService:
     def provider_metadata(self):
         public = self._registry().public()
         source = public.get("key_source", "none")
+        remaining, retry_at = None, None
+        if self._analysis_store:
+            try:
+                remaining = self._analysis_store.daily_remaining()
+                retry_at = self._analysis_store.retry_at()
+            except (OSError, sqlite3.Error, ValueError):
+                pass
         return {"provider": "openrouter", "configured": public.get("configured") is True,
                 "key_source": source if isinstance(source, str) and source in {"environment", "session", "saved", "none"} else "none",
                 "remember_key": public.get("remember_key") is True,
                 "remember_available": public.get("remember_available") is True,
                 "storage_error": public.get("storage_error") is True,
                 "quota_snapshot": public.get("quota_snapshot"),
-                "app_daily_remaining": self._analysis_store.daily_remaining() if self._analysis_store else None,
+                "app_daily_remaining": remaining, "retry_at": retry_at,
                 "model": "openrouter/free", "free_only": True, "privacy": "deny_training",
                 "daily_limit": 50, "require_zdr": public.get("require_zdr") is True,
                 "response_mode": "prompt" if public.get("response_mode") == "prompt" else "schema",
@@ -366,7 +375,7 @@ class AutomationService:
         allowed = {
             "collection": {"kind", "urls", "max_pages", "resume", "transport", "analyse", "analysis_method", "allow_external"},
             "analysis": {"kind", "dataset", "asin", "analysis_method", "allow_external", "depth"},
-            "research": {"kind", "dataset", "asin", "question", "allow_external"},
+            "research": {"kind", "dataset", "asin", "question", "allow_external", "research_mode"},
             "auth": {"kind"},
         }
         if not isinstance(kind, str) or kind not in allowed or set(payload) - allowed[kind]:
@@ -385,12 +394,10 @@ class AutomationService:
             self._scope(dataset, asin)
             if not isinstance(question, str) or not question.strip() or len(question) > 1500:
                 raise ValueError("Ask a nonempty question with at most 1,500 characters.")
-            if not can_answer_locally(question.strip()):
-                if not self.provider_metadata()["configured"]:
-                    raise ValueError("Configure OpenRouter in Settings before asking this question.")
-                if not external:
-                    raise ValueError("Confirm that the selected review text may be sent to OpenRouter.")
-            return kind, {"dataset": dataset, "asin": asin, "question": question.strip(), "allow_external": external}
+            mode = payload.get("research_mode", "focused")
+            if not isinstance(mode, str) or mode not in {"focused", "agent"}:
+                raise ValueError("Choose focused research or agent investigation.")
+            return kind, {"dataset": dataset, "asin": asin, "question": question.strip(), "allow_external": external, "research_mode": mode}
         if method == "openrouter":
             if kind != "analysis":
                 raise ValueError("Automatic collection reports use local analysis. Choose AI separately in Analysis.")
@@ -572,18 +579,16 @@ class AutomationService:
         return report_id, False
 
     def _research(self, job_id, options):
-        from llm_analysis import can_answer_locally
-        if not can_answer_locally(options["question"]) and not options["allow_external"]:
-            raise ValueError("Confirm review sharing before asking an AI question.")
         self._update(job_id, phase="researching", detail="Inspecting saved review evidence.")
         answer = self._engine().ask(self._rows(options["dataset"], options["asin"]), options["question"],
                                     dataset=options["dataset"], asin=options["asin"],
+                                    allow_external=options["allow_external"], strategy=options.get("research_mode", "focused"),
                                     cancelled=self._cancel.is_set,
                                     on_progress=self._llm_progress(job_id, "researching"))
         if self._cancel.is_set() or self._shutdown.is_set():
             self._update(job_id, status="cancelled", phase="finished", detail="Research stopped. Saved analysis chunks are retained.")
             return
-        fields = {"question", "answer", "evidence", "limitations", "scope", "usage", "steps", "method", "model", "fingerprint"}
+        fields = {"question", "answer", "evidence", "limitations", "scope", "usage", "steps", "method", "model", "fingerprint", "notice", "research_mode", "cache_hit"}
         if not isinstance(answer, dict):
             raise ValueError("Research did not return a valid answer.")
         result = {key: value for key, value in answer.items() if key in fields}
@@ -594,7 +599,7 @@ class AutomationService:
             raise ValueError("Research exceeded its answer limits. No answer was saved.")
         result["question"] = options["question"]
         self._update(job_id, status="succeeded", phase="finished", result=result,
-                     detail="The answer is ready. Open its source reviews to check the evidence.")
+                     detail="Local evidence is ready. No AI conclusion was saved." if result.get("method") == "local_evidence" else "The answer is ready. Open its source reviews to check the evidence.")
 
     def _run(self, job):
         job_id, options = job["id"], job["options"]
