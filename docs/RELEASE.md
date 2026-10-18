@@ -12,7 +12,9 @@ The intended product direction is a hosted app that anyone can use. See the [pub
 - Local statistics and keyword reports work independently of provider availability.
 - Compatible JSON mode does not require native provider JSON support, while retaining strict local validation. Provider-enforced JSON is an explicit alternative. Fictional-response tests cover both modes, cache isolation, exact encoded request sizing, safe routing categories and rejection of unavailable source passages. No live compatibility-mode report has been accepted yet.
 - A later compatible-mode 100-review request reached Cohere and returned a complete response at a reported cost of $0.00. Local citation validation rejected it, so it did not produce an accepted AI report. The saved historical error cannot distinguish an unknown passage from duplicate evidence.
-- New citation diagnostics distinguish unknown passage labels, repeated passages and multiple passages from the same review used as separate sources in a topic. They retain only a fixed reason code, without storing the rejected answer or relaxing validation. OpenRouter I/O logging is a separate, optional account setting that stores future prompts and answers; enabling it cannot recover a past response.
+- A subsequent logged request identified one concrete citation failure: two valid passage labels came from the same review. The updated engine preserves both exact excerpts under one source and counts its review and rating once, including across long-review segments and cached results. Unknown labels, repeated labels and altered quotes still fail validation. This source-grouping change has offline coverage; its live verification is pending.
+- Citation diagnostics retain only fixed reason codes without storing the rejected answer. OpenRouter I/O logging is a separate, optional account setting that stores future prompts and answers; enabling it cannot recover a past response.
+- Another logged response exceeded the preferred short format. The updated engine separates those writing preferences from the hard report limits documented in the README. Exact source checks and the 1,000-token output ceiling remain in force. Live verification of the combined changes is pending.
 - Automated tests use fictional reviews and fake model responses. They cover pagination recovery, duplicate handling, transactions, cancellation, validation, privacy boundaries, cache reuse and request budgets. CI runs on Windows and Linux with Python 3.10 and 3.13.
 
 Live collection pins Playwright to the version used in this workspace. The offline app needs only Python's standard library. Recheck the pinned dependency and its browser build before a release; a pin makes updates deliberate, not permanently safe.
@@ -29,7 +31,7 @@ flowchart TD
     D --> E{Valid matching cache?}
     E -->|Yes| F[Recheck saved source evidence]
     E -->|No, with explicit consent| G[One bounded free-model request per batch]
-    G --> H[Validate JSON, compact limits and passage IDs]
+    G --> H[Validate JSON, hard size limits and passage IDs]
     H --> F
     F --> I[Insert original quotes and combine findings]
     C --> I
@@ -37,7 +39,7 @@ flowchart TD
     G -->|Unavailable or invalid| K[Stop and retain only completed valid chunks]
 ```
 
-For 100 stored reviews, broader coverage can fit in one batch. Long reviews are split without discarding text. Each batch can return at most three themes with two cited reviews per theme, so reading all text does not mean every issue will appear in the summary. Theme counts show cited examples, not measured prevalence. Rating statistics cover the selected stored collection independently of text coverage.
+For 100 stored reviews, broader coverage can fit in one batch. Long reviews are split without discarding text. The model is asked for three themes and two passages per theme, with hard limits of eight themes and eight passages. Reading all text does not mean every issue will appear in the summary. Theme counts show distinct cited reviews, not measured prevalence. Multiple passages from one review count once. Rating statistics cover the selected stored collection independently of text coverage.
 
 The scraper does not use an LLM to navigate Amazon. The research assistant uses bounded read-only local tools only when a question needs evidence. Recognized count and rating questions stay local. More agents do not automatically improve either workflow.
 

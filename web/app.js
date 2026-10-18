@@ -1187,9 +1187,12 @@
         const moreSources = node("div", "theme-more-evidence");
         moreSources.id = `theme-more-sources-${themeIndex}`; moreSources.hidden = true;
         for (const [sourceIndex, evidence] of sources.entries()) {
-          const evidenceCard = node("div", "evidence-card"), quote = node("blockquote", "", evidence.quote || "Review evidence");
+          const evidenceCard = node("div", "evidence-card");
+          const quotes = Array.isArray(evidence.quotes) && evidence.quotes.length ? evidence.quotes.slice(0, 8) : [evidence.quote || "Review evidence"];
+          if (quotes.length > 1) evidenceCard.append(node("p", "muted", `${number(quotes.length)} passages from one review`));
+          for (const quote of quotes) evidenceCard.append(node("blockquote", "", quote));
           const action = button("Read source review", "text-button", () => openEvidence(evidence, scope.dataset || state.dataset, action), "arrow");
-          const source = node("div", "evidence-source"); source.append(node("code", "", evidence.asin || ""), action); evidenceCard.append(quote, source);
+          const source = node("div", "evidence-source"); source.append(node("code", "", evidence.asin || ""), action); evidenceCard.append(source);
           (sourceIndex < 3 ? evidenceList : moreSources).append(evidenceCard);
         }
         if (sources.length > 3) {
@@ -1228,7 +1231,7 @@
       const router = report.method === "openrouter";
       const selection = router && report.plan?.depth === "deep" ? "Broader coverage splits long reviews into segments and packs requests within a fixed byte budget." : "The model receives a bounded selection of review text. Shortened or excluded reviews are disclosed in the coverage notes.";
       steps.push(`${selection} ${number(scope.analysed_reviews)} reviews were analysed; ${number(scope.excluded_reviews)} were excluded. Reviewer names and Amazon session data are not supplied by the app; review text itself may contain personal details.`);
-      steps.push(router ? "The model proposes up to three themes per batch and selects labelled passages. Python inserts the original quotes and checks their source references before saving a chunk. Cited counts are examples, not the number of all reviews expressing that view." : "The model proposes themes and quotes. Python checks that every quote occurs in the cited submitted text. Cited counts are examples, not topic prevalence.");
+      steps.push(router ? "The model selects labelled passages for its themes. Python inserts the original quotes and checks their source references before saving a chunk. Multiple passages from one review count as one source. Cited counts are examples, not the number of all reviews expressing that view." : "The model proposes themes and quotes. Python checks that every quote occurs in the cited submitted text. Cited counts are examples, not topic prevalence.");
       steps.push("A source match proves where a quote came from. It does not prove the interpretation. Read the linked reviews before relying on a conclusion.");
       if (router) {
         const provenance = report.provenance;

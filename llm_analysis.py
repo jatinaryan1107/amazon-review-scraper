@@ -14,7 +14,7 @@ from review_analysis import (AnalysisCancelled, AnalysisError, _base_report,
                              _round_robin, _validate_model_report, report_fingerprint)
 
 
-ENGINE_VERSION = 6
+ENGINE_VERSION = 8
 MAX_CALLS = 30
 MAX_CHARS = 24_000
 MAX_OUTPUT_TOKENS = 1000
@@ -39,10 +39,11 @@ _INSTRUCTIONS = (
     "Keep the whole JSON compact, about 500 tokens. Review title and body contain labelled source passages. "
     "Each theme's evidence is an array of passage IDs, for example [\"e2\",\"e7\"]. "
     "Select only IDs supplied in this chunk. Never write a quote or invent an ID. The app inserts the original text. "
-    "Use at most three themes and two passage IDs per theme, from different reviews within each theme. "
+    "Prefer at most three themes and two passage IDs per theme. Prefer different reviews; "
+    "multiple passages from one review are grouped as one source, never independent support. "
     "Counts describe cited examples only, never prevalence. "
     "Do not state totals, percentages, averages, fraud or safety conclusions. Code computes exact statistics. "
-    "Summary is at most 360 characters, labels 60, explanations 160, limitations 160 each, at most two limitations. "
+    "Aim for a summary under 360 characters, labels under 60, explanations under 160, and at most two short limitations. "
     "Write plain language without em dashes or en dashes."
 )
 
@@ -52,17 +53,15 @@ def _hash(value):
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def _compact_report_schema(keys):
+def _bounded_report_schema(keys):
     schema = _report_schema(keys)
     fields = schema["properties"]
-    fields["summary"]["maxLength"] = 360
-    fields["themes"]["maxItems"] = 3
+    fields["summary"]["maxLength"] = 1500
     theme = fields["themes"]["items"]["properties"]
-    theme["label"]["maxLength"] = 60
-    theme["explanation"]["maxLength"] = 160
-    theme["evidence"]["maxItems"] = 2
+    theme["label"]["maxLength"] = 80
+    theme["explanation"]["maxLength"] = 600
     theme["evidence"]["items"] = {"type": "string", "enum": keys}
-    fields["limitations"].update(maxItems=2, items={"type": "string", "maxLength": 160})
+    fields["limitations"].update(maxItems=6, items={"type": "string", "maxLength": 300})
     return schema
 
 
@@ -97,17 +96,15 @@ def _wire_chunk(chunk, citations=None):
 def _hydrate_evidence(identities, citations):
     if not isinstance(identities, list):
         raise ProviderError("The model citations have invalid fields.", code="report_format")
-    evidence, seen, seen_passages = [], set(), set()
+    evidence, seen_passages = [], set()
     for identity in identities:
         if not isinstance(identity, str) or identity not in citations:
             raise ProviderError("The model selected unavailable source evidence.", code="evidence_reference",
                                 diagnostics={"evidence_reason": "unknown_passage"})
         citation = citations[identity]
-        if citation["key"] in seen:
-            reason = "repeated_passage" if identity in seen_passages else "same_review"
+        if identity in seen_passages:
             raise ProviderError("The model selected duplicate review evidence.", code="evidence_reference",
-                                diagnostics={"evidence_reason": reason})
-        seen.add(citation["key"])
+                                diagnostics={"evidence_reason": "repeated_passage"})
         seen_passages.add(identity)
         evidence.append(dict(citation))
     return evidence
@@ -137,16 +134,8 @@ def _model_json(content):
 
 def _checked_report(value, lookup):
     try:
-        _compact_report_limits(value)
-        result = _validate_model_report(value, lookup)
-        for theme in result["themes"]:
-            identities = [item["review_id"] for item in theme["evidence"]]
-            if len(set(identities)) != len(identities):
-                raise ProviderError("The model selected multiple passages from one review.",
-                                    code="evidence_reference", diagnostics={"evidence_reason": "same_review"})
-        return result
-    except ProviderError:
-        raise
+        _bounded_report_limits(value)
+        return _validate_model_report(value, lookup, group_passages=True)
     except AnalysisError as exc:
         reasons = {
             "The AI report cited an unknown or duplicate review. No partial analysis was saved.": "evidence_reference",
@@ -158,28 +147,28 @@ def _checked_report(value, lookup):
                             code=reasons.get(str(exc), "report_format")) from None
 
 
-def _compact_report_limits(value):
+def _bounded_report_limits(value):
     """Enforce local bounds even when a provider ignores its JSON schema."""
     def text(item, maximum):
         return isinstance(item, str) and bool(item.strip()) and len(item) <= maximum
 
-    if (not isinstance(value, dict) or not text(value.get("summary"), 360)
-            or not isinstance(value.get("themes"), list) or len(value["themes"]) > 3
-            or not isinstance(value.get("limitations"), list) or len(value["limitations"]) > 2
-            or any(not text(item, 160) for item in value["limitations"])):
-        raise AnalysisError("The model report exceeded its compact format limits.")
+    if (not isinstance(value, dict) or not text(value.get("summary"), 1500)
+            or not isinstance(value.get("themes"), list) or len(value["themes"]) > 8
+            or not isinstance(value.get("limitations"), list) or len(value["limitations"]) > 6
+            or any(not text(item, 300) for item in value["limitations"])):
+        raise AnalysisError("The model report exceeded its format limits.")
     for theme in value["themes"]:
-        if (not isinstance(theme, dict) or not text(theme.get("label"), 60)
-                or not text(theme.get("explanation"), 160)
-                or not isinstance(theme.get("evidence"), list) or not 1 <= len(theme["evidence"]) <= 2):
-            raise AnalysisError("The model topic exceeded its compact format limits.")
+        if (not isinstance(theme, dict) or not text(theme.get("label"), 80)
+                or not text(theme.get("explanation"), 600)
+                or not isinstance(theme.get("evidence"), list) or not 1 <= len(theme["evidence"]) <= 8):
+            raise AnalysisError("The model topic exceeded its format limits.")
 
 
 def _report_request(chunk):
     wire, citations = _wire_chunk(chunk)
     messages = [{"role": "system", "content": _INSTRUCTIONS},
                 {"role": "user", "content": json.dumps(wire, ensure_ascii=False)}]
-    return messages, _compact_report_schema(list(citations)), citations
+    return messages, _bounded_report_schema(list(citations)), citations
 
 
 def _request_bytes(chunk, response_mode="schema", require_zdr=True):
@@ -458,6 +447,7 @@ class LLMEngine:
         merged = {}
         rows_by_id = {row["review_id"]: row for row in canonical}
         omitted_explanations = False
+        omitted_passages = False
         for index, chunk_report in enumerate(checked, 1):
             for topic in chunk_report["themes"]:
                 key = topic["label"].casefold()
@@ -469,7 +459,13 @@ class LLMEngine:
                     else:
                         omitted_explanations = True
                 for evidence in topic["evidence"]:
-                    group["evidence"].setdefault(evidence["review_id"], evidence)
+                    source = group["evidence"].setdefault(evidence["review_id"], {**evidence, "quotes": []})
+                    for quote in evidence.get("quotes", [evidence["quote"]]):
+                        if quote not in source["quotes"]:
+                            if len(source["quotes"]) < 8:
+                                source["quotes"].append(quote)
+                            else:
+                                omitted_passages = True
         themes = []
         for group in sorted(merged.values(), key=lambda item: (-len(item["evidence"]), item["label"]))[:8]:
             evidence = list(group["evidence"].values())
@@ -498,6 +494,8 @@ class LLMEngine:
         report["limitations"].extend(f"Chunk {index}: {limit}" for limit, index in list(model_limits.items())[:6])
         if omitted_explanations or len(model_limits) > 6:
             report["limitations"].append("The merged report shows up to three unique explanations per theme and six unique model limitations; additional chunk commentary is retained in the local cache.")
+        if omitted_passages:
+            report["limitations"].append("Each source card shows at most eight distinct passages. Additional validated passages remain in the local chunk cache.")
         report["limitations"].extend([
             "AI interpretations need human review. Quotes are checked against submitted source text.",
             "Shared review IDs are counted once across products. Product memberships and conflicting variants are disclosed separately.",

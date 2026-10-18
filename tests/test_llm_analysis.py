@@ -93,17 +93,17 @@ class EngineTests(unittest.TestCase):
                     self.assertEqual(plan["request_bytes"], len(json.dumps(sent[0], ensure_ascii=False).encode("utf-8")))
                     self.assertEqual(plan["require_zdr"], zdr)
 
-    def test_provider_ignoring_compact_schema_cannot_save_or_cache_report(self):
+    def test_provider_exceeding_hard_report_limits_cannot_save_or_cache_report(self):
         mutations = {
-            "long_summary": lambda value, ids: value.update(summary="x" * 361),
-            "long_label": lambda value, ids: value["themes"][0].update(label="x" * 61),
-            "long_explanation": lambda value, ids: value["themes"][0].update(explanation="x" * 161),
-            "many_themes": lambda value, ids: value.update(themes=[{**value["themes"][0], "label": str(i)} for i in range(4)]),
-            "many_sources": lambda value, ids: value["themes"][0].update(evidence=ids[:3]),
-            "many_limits": lambda value, ids: value.update(limitations=["A limit"] * 3),
-            "long_limit": lambda value, ids: value.update(limitations=["x" * 161]),
+            "long_summary": lambda value, ids: value.update(summary="x" * 1501),
+            "long_label": lambda value, ids: value["themes"][0].update(label="x" * 81),
+            "long_explanation": lambda value, ids: value["themes"][0].update(explanation="x" * 601),
+            "many_themes": lambda value, ids: value.update(themes=[{**value["themes"][0], "label": str(i)} for i in range(9)]),
+            "many_sources": lambda value, ids: value["themes"][0].update(evidence=ids[:9]),
+            "many_limits": lambda value, ids: value.update(limitations=["A limit"] * 7),
+            "long_limit": lambda value, ids: value.update(limitations=["x" * 301]),
         }
-        rows = [review(i) for i in range(3)]
+        rows = [review(i) for i in range(9)]
         for name, mutate in mutations.items():
             def invalid(payload):
                 entries = json.loads(payload["messages"][-1]["content"])["reviews"]
@@ -116,30 +116,52 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, "report_format")
             self.assertEqual(self.engine().plan(rows)["chunks_cached"], 0)
 
-    def test_cached_report_must_still_meet_compact_limits(self):
+    def test_cached_report_must_still_meet_hard_limits(self):
         engine = self.engine()
         engine.analyse([review()], dataset="workspace", asin="")
         canonical, _, _, _ = engine._prepare([review()], "workspace", "")
         chunks, _, _, _ = engine._manifest(canonical, "quick")
         key = engine._chunk_key(chunks[0], "quick")
         cached = self.store.get_chunk(key)
-        cached["result"]["summary"] = "x" * 361
+        cached["result"]["summary"] = "x" * 1501
         self.store.put_chunk(key, cached)
         self.assertEqual(engine.plan([review()])["chunks_cached"], 0)
 
-    def test_two_segments_of_one_review_cannot_count_as_two_sources(self):
+    def test_longer_valid_report_is_accepted_without_truncating_or_skipping_source_checks(self):
+        rows = [review(i) for i in range(5)]
+        def longer(payload):
+            entries = json.loads(payload["messages"][-1]["content"])["reviews"]
+            value = json.loads(report_response(payload)["choices"][0]["message"]["content"])
+            value["summary"] = "A fictional summary. " * 25
+            value["themes"][0]["explanation"] = "A fictional observation. " * 8
+            value["themes"][0]["evidence"] = [next(iter(entry["body"])) for entry in entries]
+            return response(json.dumps(value))
+        result = self.engine(longer).analyse(rows, dataset="workspace", asin="")
+        self.assertEqual(result["summary"], ("A fictional summary. " * 25).strip())
+        self.assertEqual(result["themes"][0]["review_count"], 5)
+        self.assertEqual(sum(result["themes"][0]["rating_mix"].values()), 5)
+        self.assertEqual(len(result["themes"][0]["evidence"]), 5)
+
+    def test_two_segments_of_one_review_preserve_both_quotes_and_count_one_source(self):
         def duplicate_source(payload):
             entries = json.loads(payload["messages"][-1]["content"])["reviews"]
             self.assertEqual(len(entries), 2)
             value = json.loads(report_response(payload)["choices"][0]["message"]["content"])
             value["themes"][0]["evidence"] = [next(iter(entry["body"])) for entry in entries]
             return response(json.dumps(value))
-        rows = [review(review_body="Battery observation " * 100)]
-        with self.assertRaises(ProviderError) as caught:
-            self.engine(duplicate_source).analyse(rows, dataset="workspace", asin="", depth="deep")
-        self.assertEqual(caught.exception.code, "evidence_reference")
-        self.assertEqual(caught.exception.diagnostics, {"evidence_reason": "same_review"})
-        self.assertEqual(self.engine().plan(rows, depth="deep")["chunks_cached"], 0)
+        rows = [review(review_body="Battery observation " * 75 + "A distinct second segment. " * 20)]
+        engine = self.engine(duplicate_source)
+        result = engine.analyse(rows, dataset="workspace", asin="", depth="deep")
+        topic = result["themes"][0]
+        self.assertEqual(topic["review_count"], 1)
+        self.assertEqual(sum(topic["rating_mix"].values()), 1)
+        self.assertEqual(len(topic["evidence"]), 1)
+        self.assertEqual(len(topic["evidence"][0]["quotes"]), 2)
+        for quote in topic["evidence"][0]["quotes"]:
+            self.assertIn(quote, rows[0]["review_body"])
+        cached = engine.analyse(rows, dataset="workspace", asin="", depth="deep")
+        self.assertEqual(cached["themes"], result["themes"])
+        self.assertEqual(cached["usage"]["calls"], 0)
 
     def test_full_hundred_review_workflow_records_policy_and_reuses_validated_text(self):
         rows = [review(i, rating=str(i % 5 + 1), review_body="Fictional battery text " * 80) for i in range(100)]
@@ -195,7 +217,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(quote, text)
 
     def test_unknown_or_duplicate_passages_are_rejected_without_caching(self):
-        for mode in ["unknown", "duplicate", "same_review"]:
+        for mode in ["unknown", "duplicate"]:
             def invalid(payload):
                 entry = json.loads(payload["messages"][-1]["content"])["reviews"][0]
                 ids = [*entry["title"], *entry["body"]]
@@ -209,6 +231,19 @@ class EngineTests(unittest.TestCase):
             expected = {"unknown": "unknown_passage", "duplicate": "repeated_passage", "same_review": "same_review"}
             self.assertEqual(caught.exception.diagnostics, {"evidence_reason": expected[mode]})
             self.assertEqual(self.engine().plan([review()])["chunks_cached"], 0)
+
+    def test_two_passages_in_one_segment_are_grouped_without_double_counting(self):
+        def two_passages(payload):
+            entry = json.loads(payload["messages"][-1]["content"])["reviews"][0]
+            value = json.loads(report_response(payload)["choices"][0]["message"]["content"])
+            value["themes"][0]["evidence"] = [*entry["title"], *entry["body"]]
+            return response(json.dumps(value))
+        rows = [review()]
+        result = self.engine(two_passages).analyse(rows, dataset="workspace", asin="")
+        topic = result["themes"][0]
+        self.assertEqual(topic["review_count"], 1)
+        self.assertEqual(topic["rating_mix"]["positive"], 1)
+        self.assertEqual(topic["evidence"][0]["quotes"], [rows[0]["review_title"], rows[0]["review_body"]])
 
     def test_tampered_cached_quote_is_rejected_even_after_passage_resolution(self):
         engine = self.engine()

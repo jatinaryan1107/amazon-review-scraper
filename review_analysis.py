@@ -327,7 +327,7 @@ def _bounded_text(value: Any, limit: int, *, allow_empty: bool = False) -> str:
     return value.strip()
 
 
-def _validate_model_report(payload: Any, lookup: dict[str, dict[str, str]]) -> dict[str, Any]:
+def _validate_model_report(payload: Any, lookup: dict[str, dict[str, str]], *, group_passages=False) -> dict[str, Any]:
     if not isinstance(payload, dict) or set(payload) != {"summary", "themes", "limitations"}:
         raise AnalysisError("The AI report did not match the required format.")
     summary = _bounded_text(payload["summary"], 1500)
@@ -353,11 +353,12 @@ def _validate_model_report(payload: Any, lookup: dict[str, dict[str, str]]) -> d
         cited_rows = []
         validated_evidence = []
         seen = set()
+        sources = {}
         for citation in evidence:
             if not isinstance(citation, dict) or set(citation) != {"key", "quote"}:
                 raise AnalysisError("The AI report contains an invalid review citation.")
             key = citation["key"]
-            if not isinstance(key, str) or key not in lookup or key in seen:
+            if not isinstance(key, str) or key not in lookup or (not group_passages and key in seen):
                 raise AnalysisError("The AI report cited an unknown or duplicate review. No partial analysis was saved.")
             quote = citation["quote"]
             if not isinstance(quote, str) or not quote.strip() or len(quote) > 280:
@@ -365,6 +366,18 @@ def _validate_model_report(payload: Any, lookup: dict[str, dict[str, str]]) -> d
             row = lookup[key]
             if quote not in row["sent_title"] and quote not in row["sent_body"]:
                 raise AnalysisError("An AI quote could not be found in its cited review. No partial analysis was saved.")
+            if group_passages and (key, quote) in seen:
+                raise AnalysisError("The AI report cited an unknown or duplicate review. No partial analysis was saved.")
+            if group_passages:
+                seen.add((key, quote))
+                identity = row["review_id"]
+                if identity not in sources:
+                    sources[identity] = {"asin": row["asin"], "review_id": identity, "quote": quote, "quotes": []}
+                    validated_evidence.append(sources[identity])
+                    cited_rows.append(row)
+                if quote not in sources[identity]["quotes"]:
+                    sources[identity]["quotes"].append(quote)
+                continue
             seen.add(key)
             cited_rows.append(row)
             validated_evidence.append({"asin": row["asin"], "review_id": row["review_id"], "quote": quote})
