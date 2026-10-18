@@ -42,6 +42,10 @@ def public_diagnostics(value):
     reason = value.get("routing_reason")
     if isinstance(reason, str) and reason in ROUTING_REASONS:
         safe["routing_reason"] = reason
+    evidence_reason = value.get("evidence_reason")
+    if isinstance(evidence_reason, str) and evidence_reason in {
+            "unknown_passage", "repeated_passage", "same_review"}:
+        safe["evidence_reason"] = evidence_reason
     source = value.get("rate_limit_source")
     if isinstance(source, str) and source in {"openrouter", "provider", "unknown"}:
         safe["rate_limit_source"] = source

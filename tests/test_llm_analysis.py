@@ -138,6 +138,7 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(ProviderError) as caught:
             self.engine(duplicate_source).analyse(rows, dataset="workspace", asin="", depth="deep")
         self.assertEqual(caught.exception.code, "evidence_reference")
+        self.assertEqual(caught.exception.diagnostics, {"evidence_reason": "same_review"})
         self.assertEqual(self.engine().plan(rows, depth="deep")["chunks_cached"], 0)
 
     def test_full_hundred_review_workflow_records_policy_and_reuses_validated_text(self):
@@ -205,6 +206,8 @@ class EngineTests(unittest.TestCase):
             with self.subTest(mode=mode), self.assertRaises(ProviderError) as caught:
                 self.engine(invalid).analyse([review()], dataset="workspace", asin="")
             self.assertEqual(caught.exception.code, "evidence_reference")
+            expected = {"unknown": "unknown_passage", "duplicate": "repeated_passage", "same_review": "same_review"}
+            self.assertEqual(caught.exception.diagnostics, {"evidence_reason": expected[mode]})
             self.assertEqual(self.engine().plan([review()])["chunks_cached"], 0)
 
     def test_tampered_cached_quote_is_rejected_even_after_passage_resolution(self):

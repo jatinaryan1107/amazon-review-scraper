@@ -19,6 +19,19 @@ def completion(content='{"ok":true}', **changes):
 
 
 class ProviderTests(unittest.TestCase):
+    def test_citation_failure_reasons_are_specific_without_exposing_model_content(self):
+        from job_manager import provider_failure
+        for reason, phrase in [("unknown_passage", "not supplied"),
+                               ("repeated_passage", "repeated one passage"),
+                               ("same_review", "one review"), (KEY, "missing or duplicate")]:
+            with self.subTest(reason=reason):
+                message, result = provider_failure(ProviderError(KEY, code="evidence_reference", diagnostics={
+                    "evidence_reason": reason, "raw_output": KEY, "passage_label": KEY}))
+                self.assertIn(phrase, message)
+                self.assertNotIn(KEY, message + json.dumps(result))
+                expected = {} if reason == KEY else {"evidence_reason": reason}
+                self.assertEqual(result.get("diagnostics", {}), expected)
+
     def test_compatible_json_preserves_local_contract_without_remote_format_requirement(self):
         captured = []
         schema = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}

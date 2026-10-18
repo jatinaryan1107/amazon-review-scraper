@@ -97,14 +97,18 @@ def _wire_chunk(chunk, citations=None):
 def _hydrate_evidence(identities, citations):
     if not isinstance(identities, list):
         raise ProviderError("The model citations have invalid fields.", code="report_format")
-    evidence, seen = [], set()
+    evidence, seen, seen_passages = [], set(), set()
     for identity in identities:
         if not isinstance(identity, str) or identity not in citations:
-            raise ProviderError("The model selected unavailable source evidence.", code="evidence_reference")
+            raise ProviderError("The model selected unavailable source evidence.", code="evidence_reference",
+                                diagnostics={"evidence_reason": "unknown_passage"})
         citation = citations[identity]
         if citation["key"] in seen:
-            raise ProviderError("The model selected duplicate review evidence.", code="evidence_reference")
+            reason = "repeated_passage" if identity in seen_passages else "same_review"
+            raise ProviderError("The model selected duplicate review evidence.", code="evidence_reference",
+                                diagnostics={"evidence_reason": reason})
         seen.add(citation["key"])
+        seen_passages.add(identity)
         evidence.append(dict(citation))
     return evidence
 
@@ -138,8 +142,11 @@ def _checked_report(value, lookup):
         for theme in result["themes"]:
             identities = [item["review_id"] for item in theme["evidence"]]
             if len(set(identities)) != len(identities):
-                raise AnalysisError("The AI report cited an unknown or duplicate review. No partial analysis was saved.")
+                raise ProviderError("The model selected multiple passages from one review.",
+                                    code="evidence_reference", diagnostics={"evidence_reason": "same_review"})
         return result
+    except ProviderError:
+        raise
     except AnalysisError as exc:
         reasons = {
             "The AI report cited an unknown or duplicate review. No partial analysis was saved.": "evidence_reference",

@@ -60,6 +60,12 @@ def provider_failure(error):
     if details:
         result["diagnostics"] = details
     message = PROVIDER_MESSAGES.get(code, "AI analysis could not finish. Completed chunks are retained.")
+    if code == "evidence_reference":
+        message = {
+            "unknown_passage": "The model cited a passage label that was not supplied. No answer was saved.",
+            "repeated_passage": "The model repeated one passage within a topic. No answer was saved.",
+            "same_review": "The model used multiple passages from one review as separate sources within a topic. No answer was saved.",
+        }.get(details.get("evidence_reason"), message)
     if code == "rate_limit" and details.get("rate_limit_source") == "provider":
         message = "The model provider is limiting requests. Your daily OpenRouter allowance may still be available."
     elif code == "rate_limit" and details.get("rate_limit_source") == "openrouter":
