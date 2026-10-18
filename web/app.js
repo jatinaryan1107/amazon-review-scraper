@@ -19,7 +19,7 @@
     pollTimer: null, mutation: false, jobStatuses: new Map(), jobRenderKey: "", analysisJobKey: "",
     analysis: null, analysisVersion: 0, analysisController: null, analysisLoading: false,
     provider: null, providerVersion: 0, providerSaving: false, providerPolicyDirty: false,
-    providerChecking: false,
+    providerChecking: false, providerQuota: null, providerQuotaError: false,
     plan: null, planVersion: 0, planController: null, planLoading: false, planError: null,
     researchRenderKey: "", researchJobKey: "",
   };
@@ -579,8 +579,10 @@
     $("provider-key").disabled = state.providerSaving || state.providerChecking || providerBusy || state.provider?.key_source === "environment";
     $("provider-zdr").disabled = state.providerSaving || state.providerChecking || providerBusy;
     $("provider-response-mode").disabled = state.providerSaving || state.providerChecking || providerBusy;
-    $("provider-clear").disabled = state.providerSaving || state.providerChecking || providerBusy || state.provider?.key_source !== "session";
-    $("provider-check").disabled = state.providerSaving || state.providerChecking || providerBusy || !["session", "environment"].includes(state.provider?.key_source);
+    $("provider-remember").disabled = state.providerSaving || state.providerChecking || providerBusy || !state.provider?.remember_available || state.provider?.key_source === "environment";
+    $("provider-clear").disabled = state.providerSaving || state.providerChecking || providerBusy || !["session", "saved"].includes(state.provider?.key_source);
+    $("provider-check").disabled = state.providerSaving || state.providerChecking || providerBusy || !["session", "saved", "environment"].includes(state.provider?.key_source);
+    $("allowance-refresh").disabled = $("provider-check").disabled;
     $("provider-check").textContent = state.providerChecking ? "Checking account..." : "Check OpenRouter quota";
   }
   function routerStatus() {
@@ -701,6 +703,7 @@
     }
     updateWorkflowControls();
     renderResearch();
+    renderAllowance();
   }
   function schedulePoll() {
     clearTimeout(state.pollTimer);
@@ -759,7 +762,7 @@
       }
       if (refreshAnalysis) { loadAnalysis(); loadAnalysisPlan(); }
       else if (activityChanged && state.view === "analysis" && state.analysis?.report) renderAnalysis();
-      if (refreshProvider) loadProvider();
+      if (refreshProvider) { await loadProvider(); checkProviderQuota(); }
     } catch (error) {
       if (error.name === "AbortError" || version !== state.automationVersion) return;
       $("automation-error-message").textContent = error.message;
@@ -792,12 +795,13 @@
     return parts.join(" ");
   }
   async function checkProviderQuota() {
-    if (state.providerChecking || state.providerSaving || !["session", "environment"].includes(state.provider?.key_source)) return;
+    if (state.providerChecking || state.providerSaving || !["session", "saved", "environment"].includes(state.provider?.key_source)) return;
     state.providerChecking = true; updateWorkflowControls();
     const output = $("provider-quota"); output.hidden = false;
     output.replaceChildren(node("p", "field-help", "Reading OpenRouter account counters. No review text is sent."));
     try {
       const result = await postJson("/api/provider/check", {}), quota = result.quota || {};
+      state.providerQuota = result; state.providerQuotaError = false; renderAllowance();
       output.replaceChildren(node("strong", "", "OpenRouter account allowance"));
       if (quota.available) {
         const counts = node("dl", "provider-quota-counts");
@@ -809,30 +813,42 @@
       if (Number.isInteger(result.app_daily_remaining)) output.append(node("p", "field-help", `Reviewdesk separately has ${number(result.app_daily_remaining)} of ${number(result.app_daily_limit)} local attempts left. Failed and uncertain attempts count here.`));
       output.append(node("p", "field-help", "Daily allowance does not measure per-minute limits or the model provider's available capacity."),
                     node("p", "field-help", `Checked ${new Date(result.checked_at * 1000).toLocaleString()}. No AI response was generated.`));
-    } catch (error) { output.replaceChildren(node("p", "form-message error", error.message)); }
+    } catch (error) { output.replaceChildren(node("p", "form-message error", error.message)); state.providerQuotaError = true; renderAllowance(); }
     finally { state.providerChecking = false; updateWorkflowControls(); }
+  }
+  function renderAllowance() {
+    const result = state.providerQuota, quota = result?.quota;
+    const freshDay = result && Date.now() < Number(result.resets_at) * 1000;
+    $("allowance-summary").textContent = quota?.available && freshDay ? `${number(quota.remaining)} / ${number(quota.limit)} AI requests left` : "AI allowance not checked";
+    const local = Number.isInteger(result?.app_daily_remaining) ? ` Reviewdesk budget: ${number(result.app_daily_remaining)} attempts left.` : "";
+    $("allowance-detail").textContent = result && freshDay ? `Checked ${new Date(result.checked_at * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}.${local} Refresh for the latest count.` : state.provider?.configured ? "Refresh to check OpenRouter. This uses no model requests." : "Connect a key to check remaining requests.";
+    if (state.providerQuotaError) $("allowance-detail").textContent = "The last check failed. Any count above is from an earlier check. Refresh to try again; no model call was made.";
   }
   function renderProvider() {
     const provider = state.provider;
     if (!provider) return;
     $("provider-status-label").textContent = provider.disabled ? "REQUESTS DISABLED" : provider.configured ? "CONFIGURED" : "NOT CONNECTED";
     $("provider-sidebar-status").textContent = provider.disabled ? "Check account" : provider.configured ? "Free models" : "Not connected";
-    $("provider-source-label").textContent = provider.key_source === "environment" ? "The key is managed in the server environment. Change it there and restart the server to replace it." : provider.key_source === "session" ? "A key is held in local server memory until restart. Its value is never returned to this page." : "Add a key for this local server session. Nothing is saved to browser storage.";
+    $("provider-source-label").textContent = provider.key_source === "environment" ? "The key is managed in the server environment. Change it there and restart the server to replace it." : provider.key_source === "saved" ? "The key is saved in Windows Credential Manager for this Windows account and reconnects after restart. Its value is never returned to this page." : provider.key_source === "session" ? "A key is held in local server memory. Choose Remember on this Windows account to keep it after restart." : provider.storage_error ? "Windows could not read the saved key. Reconnect it here or use a session-only key." : "Add a key to connect. Nothing is saved to browser storage.";
     if (provider.disabled) $("provider-source-label").textContent = "A provider reported a nonzero cost. Further AI requests are disabled. Check the provider account before reconnecting or restarting the server.";
     if (!state.providerPolicyDirty) {
       $("provider-zdr").checked = Boolean(provider.require_zdr);
       $("provider-response-mode").value = provider.response_mode === "prompt" ? "prompt" : "schema";
+      $("provider-remember").checked = Boolean(provider.remember_key);
     }
+    $("provider-remember-wrap").hidden = !provider.remember_available || provider.key_source === "environment";
     $("provider-budget-label").textContent = `App limit: up to ${number(provider.daily_limit)} model calls per day. Free model availability and provider limits may vary. Saving settings makes no model request.`;
     $("provider-save").lastElementChild.textContent = provider.configured ? "Save settings" : "Use this key";
     updateWorkflowControls();
+    renderAllowance();
   }
   async function loadProvider() {
     const version = ++state.providerVersion;
     try {
       const response = await request("/api/provider"), data = await response.json();
       if (version !== state.providerVersion) return;
-      state.provider = { configured: Boolean(data.configured), key_source: data.key_source, model: data.model, free_only: data.free_only, privacy: data.privacy, daily_limit: data.daily_limit, require_zdr: Boolean(data.require_zdr), response_mode: data.response_mode, disabled: Boolean(data.disabled) };
+      state.provider = { configured: Boolean(data.configured), key_source: data.key_source, model: data.model, free_only: data.free_only, privacy: data.privacy, daily_limit: data.daily_limit, require_zdr: Boolean(data.require_zdr), response_mode: data.response_mode, disabled: Boolean(data.disabled), remember_key: Boolean(data.remember_key), remember_available: Boolean(data.remember_available), storage_error: Boolean(data.storage_error) };
+      state.providerQuota = data.quota_snapshot ? {...data.quota_snapshot, app_daily_remaining: data.app_daily_remaining} : null;
       renderProvider();
     } catch (error) {
       if (version !== state.providerVersion) return;
@@ -853,16 +869,20 @@
     state.providerSaving = true; updateWorkflowControls(); providerMessage("Updating local server settings...");
     const payload = { require_zdr: $("provider-zdr").checked, response_mode: $("provider-response-mode").value };
     if (clear) payload.clear = true;
-    else if (key) payload.api_key = key;
+    else {
+      if (key) payload.api_key = key;
+      if (state.provider?.remember_available && state.provider?.key_source !== "environment") payload.remember_key = $("provider-remember").checked;
+    }
     $("provider-key").value = "";
     try {
       await postJson("/api/provider", payload);
+      state.providerQuotaError = false;
       $("provider-quota").hidden = true; $("provider-quota").replaceChildren();
       state.providerPolicyDirty = false;
       await loadProvider();
       $("analysis-consent").checked = false; $("research-consent").checked = false;
       if (!clear && state.provider?.configured) $("analysis-method").value = "openrouter";
-      providerMessage(clear ? "The session key was forgotten. No model request was made." : "Settings updated. No model request was made.");
+      providerMessage(clear ? "The key was forgotten, including its saved Windows copy. No model request was made." : state.provider?.remember_key ? "Key and preferences saved in Windows Credential Manager. They will reconnect after restart." : "Settings updated. No model request was made.");
       loadAnalysisPlan(); await loadAutomation();
     } catch (error) {
       const message = key ? String(error.message).split(key).join("[redacted]") : error.message;
@@ -1332,6 +1352,8 @@
   $("provider-form").addEventListener("submit", saveProvider);
   $("provider-clear").addEventListener("click", (event) => saveProvider(event, true));
   $("provider-check").addEventListener("click", checkProviderQuota);
+  $("allowance-refresh").addEventListener("click", checkProviderQuota);
+  $("provider-remember").addEventListener("change", () => { state.providerPolicyDirty = true; });
   $("provider-zdr").addEventListener("change", () => { state.providerPolicyDirty = true; });
   $("provider-response-mode").addEventListener("change", () => { state.providerPolicyDirty = true; });
   $("research-form").addEventListener("submit", startResearch);

@@ -172,7 +172,7 @@ def chat_payload(messages, *, schema=None, tools=None, require_tool=False, max_t
 
 
 class ProviderRegistry:
-    def __init__(self, environ=None, transport=None, quota_transport=None):
+    def __init__(self, environ=None, transport=None, quota_transport=None, credential_store=None):
         self._environment = os.environ if environ is None else environ
         self._transport = transport
         self._quota_transport = quota_transport
@@ -182,6 +182,30 @@ class ProviderRegistry:
         self._response_mode = "prompt"
         self._disabled = False
         self._lock = threading.RLock()
+        self._credential_store = credential_store
+        self._remember_key = False
+        self._storage_error = False
+        self._quota_snapshot = None
+        if credential_store is not None:
+            try:
+                saved = credential_store.load()
+                if saved is not None:
+                    if (not isinstance(saved, dict) or set(saved) != {"api_key", "require_zdr", "response_mode"}
+                            or not self._valid_key(saved.get("api_key"))
+                            or type(saved.get("require_zdr")) is not bool
+                            or saved.get("response_mode") not in RESPONSE_MODES):
+                        raise ValueError("Invalid saved configuration")
+                    self._session_key = saved["api_key"].strip()
+                    self._require_zdr = saved["require_zdr"]
+                    self._response_mode = saved["response_mode"]
+                    self._remember_key = True
+            except Exception:
+                self._storage_error = True
+
+    @staticmethod
+    def _valid_key(key):
+        return (isinstance(key, str) and bool(key.strip()) and len(key) <= 512
+                and all(33 <= ord(char) <= 126 for char in key.strip()))
 
     def _key(self):
         with self._lock:
@@ -189,7 +213,7 @@ class ProviderRegistry:
             if isinstance(value, str) and value.strip():
                 return value.strip(), "environment"
             if self._session_key:
-                return self._session_key, "session"
+                return self._session_key, "saved" if self._remember_key else "session"
             return "", "none"
 
     def public(self):
@@ -197,13 +221,19 @@ class ProviderRegistry:
         return {"provider": "openrouter", "configured": bool(key) and not self._disabled, "key_source": source,
                 "model": MODEL, "free_only": True, "privacy": "deny_training",
                 "daily_limit": 50, "require_zdr": self._require_zdr, "response_mode": self._response_mode,
-                "disabled": self._disabled}
+                "disabled": self._disabled, "remember_key": self._remember_key,
+                "remember_available": self._credential_store is not None, "storage_error": self._storage_error,
+                "quota_snapshot": json.loads(json.dumps(self._quota_snapshot))}
 
     def configure(self, payload):
-        if not isinstance(payload, dict) or set(payload) - {"api_key", "clear", "require_zdr", "response_mode"}:
+        if not isinstance(payload, dict) or set(payload) - {"api_key", "clear", "require_zdr", "response_mode", "remember_key"}:
             raise ProviderError("Supply a session API key or clear the saved session key.", code="configuration")
         if "require_zdr" in payload and not isinstance(payload["require_zdr"], bool):
             raise ProviderError("Zero data retention must be true or false.", code="configuration")
+        if "remember_key" in payload and type(payload["remember_key"]) is not bool:
+            raise ProviderError("Remember key must be true or false.", code="configuration")
+        if payload.get("clear") and payload.get("remember_key"):
+            raise ProviderError("Choose either remembering or forgetting the key.", code="configuration")
         if "response_mode" in payload and (not isinstance(payload["response_mode"], str) or payload["response_mode"] not in RESPONSE_MODES):
             raise ProviderError("Choose compatible JSON or provider-enforced JSON.", code="configuration")
         if "api_key" in payload and "clear" in payload:
@@ -211,12 +241,28 @@ class ProviderRegistry:
         if "clear" in payload and payload["clear"] is not True:
             raise ProviderError("Clear must be true.", code="configuration")
         key = payload.get("api_key")
-        if key is not None and (not isinstance(key, str) or not key.strip()
-                                or len(key) > 512 or any(ord(char) < 33 or ord(char) > 126 for char in key.strip())):
+        if "api_key" in payload and not self._valid_key(key):
             raise ProviderError("Enter a nonempty API key without whitespace or control characters.", code="configuration")
-        if not payload or (key is None and not {"clear", "require_zdr", "response_mode"}.intersection(payload)):
+        if not payload or (key is None and not {"clear", "require_zdr", "response_mode", "remember_key"}.intersection(payload)):
             raise ProviderError("Supply a session API key or clear the saved session key.", code="configuration")
         with self._lock:
+            if self._key()[1] == "environment" and ("api_key" in payload or "remember_key" in payload):
+                raise ProviderError("The key is managed in the server environment.", code="environment_key")
+            remember = payload.get("remember_key", self._remember_key)
+            next_key = key.strip() if isinstance(key, str) else self._session_key
+            if payload.get("clear"):
+                next_key, remember = "", False
+            if remember and (self._credential_store is None or not next_key):
+                raise ProviderError("Secure storage needs a connected key and Windows Credential Manager.", code="storage")
+            try:
+                if remember:
+                    self._credential_store.save({"api_key": next_key,
+                        "require_zdr": payload.get("require_zdr", self._require_zdr),
+                        "response_mode": payload.get("response_mode", self._response_mode)})
+                elif self._credential_store is not None and (self._remember_key or payload.get("clear") or "remember_key" in payload):
+                    self._credential_store.delete()
+            except Exception:
+                raise ProviderError("Windows could not update the saved key. Existing settings were kept.", code="storage") from None
             if "api_key" in payload:
                 if key is None:
                     raise ProviderError("Enter a nonempty API key.", code="configuration")
@@ -224,8 +270,12 @@ class ProviderRegistry:
                     raise ProviderError("The OpenRouter key is set in the server environment. Session keys cannot replace it.", code="environment_key")
                 self._session_key = key.strip()
                 self._disabled = False
+                self._quota_snapshot = None
             if payload.get("clear"):
                 self._session_key = ""
+                self._quota_snapshot = None
+            self._remember_key = remember
+            self._storage_error = False
             if "require_zdr" in payload:
                 self._require_zdr = payload["require_zdr"]
             if "response_mode" in payload:
@@ -339,8 +389,13 @@ class ProviderRegistry:
                     raise ProviderError("The account counter was invalid.", code="invalid_response")
                 quota.update(available=True, **{field: counter[field] for field in ("used", "limit", "remaining")})
             checked = int(time.time())
-            return {"quota": quota, "checked_at": checked, "resets_at": (checked // 86400 + 1) * 86400,
-                    "model_calls": 0}
+            snapshot = {"quota": quota, "checked_at": checked, "resets_at": (checked // 86400 + 1) * 86400,
+                        "model_calls": 0}
+            with self._lock:
+                if self._key()[0] != key:
+                    raise ProviderError("The configured key changed during the quota check.", code="configuration")
+                self._quota_snapshot = snapshot
+            return json.loads(json.dumps(snapshot))
         except error.HTTPError as exc:
             status, headers = exc.code, exc.headers
             exc.close()

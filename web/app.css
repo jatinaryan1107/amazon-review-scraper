@@ -3776,6 +3776,11 @@ textarea:focus-visible{
   background:var(--surface-soft)
 }
 .provider-quota>strong{font-size:12px}
+.ai-allowance{padding:10px 11px;border:1px solid var(--line);border-radius:10px;margin-top:12px}
+.ai-allowance>div{display:flex;align-items:center;justify-content:space-between;gap:6px}
+.ai-allowance strong{font-size:11px;font-weight:600;color:var(--text)}
+.ai-allowance p{font-size:10px;line-height:1.5;color:var(--muted);margin:4px 0 0}
+.ai-allowance .icon-button{width:25px;height:25px;flex-shrink:0}
 .provider-quota-counts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}
 .provider-quota-counts dt{font-size:10px;color:var(--muted)}
 .provider-quota-counts dd{margin:4px 0 0;font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}

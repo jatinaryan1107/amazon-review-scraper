@@ -258,6 +258,11 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(result["resets_at"] % 86400, 0)
         self.assertNotIn(KEY, json.dumps(result))
         self.assertNotIn("limit_remaining", json.dumps(result))
+        self.assertEqual(registry.public()["quota_snapshot"], result)
+        result["quota"]["remaining"] = 0
+        self.assertEqual(registry.public()["quota_snapshot"]["quota"]["remaining"], 45)
+        registry.configure({"clear": True})
+        self.assertIsNone(registry.public()["quota_snapshot"])
 
     def test_missing_account_counter_is_unknown_and_invalid_values_are_rejected(self):
         registry = ProviderRegistry(environ={})

@@ -24,6 +24,7 @@ LOG = logging.getLogger(__name__)
 PROVIDER_MESSAGES = {
     "configuration": "Check the OpenRouter settings and try again.",
     "environment_key": "OpenRouter is configured by the server environment. Change its key there.",
+    "storage": "Windows could not update the saved key. Existing settings were kept. Try again or use a session-only key.",
     "not_configured": "Add an OpenRouter key in Settings before using AI.",
     "invalid_request": "The AI request could not be accepted. Check the selected scope and settings.",
     "authorization": "OpenRouter could not authorize this request. Check the configured key.",
@@ -248,21 +249,27 @@ class AutomationService:
         with self._provider_mutex:
             if self._provider_registry is None:
                 from llm_provider import ProviderRegistry
-                self._provider_registry = ProviderRegistry()
+                from credential_store import system_credential_store
+                self._provider_registry = ProviderRegistry(credential_store=system_credential_store(self.data.data_dir))
             return self._provider_registry
 
     def provider_metadata(self):
         public = self._registry().public()
         source = public.get("key_source", "none")
         return {"provider": "openrouter", "configured": public.get("configured") is True,
-                "key_source": source if isinstance(source, str) and source in {"environment", "session", "none"} else "none",
+                "key_source": source if isinstance(source, str) and source in {"environment", "session", "saved", "none"} else "none",
+                "remember_key": public.get("remember_key") is True,
+                "remember_available": public.get("remember_available") is True,
+                "storage_error": public.get("storage_error") is True,
+                "quota_snapshot": public.get("quota_snapshot"),
+                "app_daily_remaining": self._analysis_store.daily_remaining() if self._analysis_store else None,
                 "model": "openrouter/free", "free_only": True, "privacy": "deny_training",
                 "daily_limit": 50, "require_zdr": public.get("require_zdr") is True,
                 "response_mode": "prompt" if public.get("response_mode") == "prompt" else "schema",
                 "disabled": public.get("disabled") is True}
 
     def configure_provider(self, payload):
-        if not isinstance(payload, dict) or not payload or set(payload) - {"api_key", "clear", "require_zdr", "response_mode"}:
+        if not isinstance(payload, dict) or not payload or set(payload) - {"api_key", "clear", "require_zdr", "response_mode", "remember_key"}:
             raise ValueError("Supply an OpenRouter key, clear the session key, or change the privacy setting.")
         if "require_zdr" in payload and not isinstance(payload["require_zdr"], bool):
             raise ValueError("The zero data retention setting must be true or false.")

@@ -399,7 +399,7 @@ class DashboardTests(unittest.TestCase):
         for headers, expected in attempts:
             status, _, content = self.request("/api/provider", method="POST", body=payload, headers=headers)
             self.assertEqual(status, expected, content)
-        for options in [{}, {"api_key": ""}, {"api_key": "x", "clear": True}, {"require_zdr": 1}, {"model": "paid-model"}, {"clear": False}, {"response_mode": []}, {"response_mode": "auto"}]:
+        for options in [{}, {"api_key": ""}, {"api_key": "x", "clear": True}, {"require_zdr": 1}, {"model": "paid-model"}, {"clear": False}, {"response_mode": []}, {"response_mode": "auto"}, {"remember_key": "yes"}]:
             status, _, content = self.post_json("/api/provider", options)
             self.assertEqual(status, 400, content)
         for body in [b'{"api_key":"one","api_key":"two"}', b'{"require_zdr":NaN}', b" " * 16385]:
@@ -407,6 +407,32 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(status, 413 if len(body) > 16384 else 400)
         self.assertEqual(self.request("/api/provider?extra=yes")[0], 400)
         self.assertEqual(self.post_json("/api/provider?extra=yes", {"clear": True})[0], 400)
+        self.assertFalse(self.get_json("/api/provider")["configured"])
+
+    def test_http_remember_restores_configuration_and_forget_removes_the_saved_copy(self):
+        class Vault:
+            value = None
+            def load(self):
+                return self.value.copy() if self.value else None
+            def save(self, value):
+                self.value = value.copy()
+            def delete(self):
+                self.value = None
+        vault = Vault()
+        self.server.automation._provider_registry = ProviderRegistry(environ={}, credential_store=vault)
+        status, _, content = self.post_json("/api/provider", {"api_key": "SYNTHETIC-SAVED-SECRET",
+            "remember_key": True, "require_zdr": False})
+        self.assertEqual(status, 200, content)
+        self.assertNotIn(b"SYNTHETIC-SAVED-SECRET", content)
+        self.server.automation._provider_registry = ProviderRegistry(environ={}, credential_store=vault)
+        public = self.get_json("/api/provider")
+        self.assertEqual(public["key_source"], "saved")
+        self.assertTrue(public["remember_key"])
+        self.assertFalse(public["require_zdr"])
+        for filename in ("jobs.sqlite3", "analysis.sqlite3"):
+            self.assertNotIn(b"SYNTHETIC-SAVED-SECRET", (self.data.data_dir / filename).read_bytes())
+        self.assertEqual(self.post_json("/api/provider", {"clear": True})[0], 200)
+        self.assertIsNone(vault.value)
         self.assertFalse(self.get_json("/api/provider")["configured"])
 
     def test_analysis_plan_is_read_only_unconfigured_and_rejects_ambiguous_scope(self):
@@ -434,6 +460,10 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(data["quota"]["remaining"], 45)
         self.assertEqual(data["app_daily_remaining"], 50)
         self.assertEqual(data["model_calls"], 0)
+        self.assertEqual(checked, [True])
+        public = self.get_json("/api/provider")
+        self.assertEqual(public["quota_snapshot"]["quota"]["remaining"], 45)
+        self.assertEqual(public["app_daily_remaining"], 50)
         self.assertEqual(checked, [True])
         self.assertNotIn("PRIVATE-LABEL", content.decode())
         self.assertNotIn("SYNTHETIC-SECRET", content.decode())
