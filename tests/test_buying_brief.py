@@ -42,6 +42,10 @@ def completion(payload):
 
 
 class BuyingBriefTests(unittest.TestCase):
+    def test_category_neutral_priorities_are_supported_without_audio_assumptions(self):
+        options = validate_options("demo", [A], ["usability", "cleaning", "value"])
+        self.assertEqual(options["priorities"], ["cleaning", "usability", "value"])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).parent)
         self.addCleanup(self.temp.cleanup)

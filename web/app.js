@@ -28,7 +28,7 @@
   };
   const viewCopy = {
     compare: ["Two products. A clearer decision.", "Compare owner experiences across any category, with the evidence and timing in view."],
-    buying: ["Before you buy, know the tradeoffs.", "A clearer view of owner experiences, shaped around what matters to you."],
+    buying: ["Take a closer look at a product.", "Read owner experiences, check the sources and see what is still unknown."],
     overview: ["Review overview", "Explore feedback, compare products, and keep the evidence close."],
     reviews: ["Every review, in focus.", "Find the feedback you need. Open any review to see the full story."],
     products: ["Your products", "Compare the feedback, then explore the reviews behind each product."],
@@ -53,29 +53,7 @@
   const isLocalQuestion = (question) => localQuestions.has(String(question).toLowerCase().replace(/\s+/g, " ").trim().replace(/[.?!]+$/, "").trim());
   const isVerified = (value) => value === true || value === 1 || String(value).toLowerCase() === "true";
   const plural = (count, noun) => `${number(count)} ${noun}${Number(count) === 1 ? "" : "s"}`;
-  function node(tag, className, textValue) {
-    const result = document.createElement(tag);
-    if (className) result.className = className;
-    if (textValue !== undefined) result.textContent = String(textValue);
-    return result;
-  }
-  function icon(name, className = "") {
-    const result = document.createElementNS(svgNS, "svg");
-    result.setAttribute("class", `icon ${className}`.trim());
-    result.setAttribute("aria-hidden", "true");
-    const use = document.createElementNS(svgNS, "use");
-    use.setAttribute("href", `#i-${name}`);
-    result.append(use);
-    return result;
-  }
-  function button(label, className, action, iconName) {
-    const result = node("button", className);
-    result.type = "button";
-    if (iconName) result.append(icon(iconName));
-    result.append(node("span", "", label));
-    result.addEventListener("click", action);
-    return result;
-  }
+  const {node, icon, button} = window.ReviewdeskUI;
   function dateLabel(value) {
     if (!value) return "Date unavailable";
     const text = String(value);
@@ -169,7 +147,7 @@
       link.classList.toggle("active", active);
       if (active) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
     });
-    const pageLabel = view === "buying" ? "Buying brief" : view === "compare" ? "Compare products" : view === "research" ? "Ask reviews" : view.charAt(0).toUpperCase() + view.slice(1);
+    const pageLabel = view === "buying" ? "Inspect a product" : view === "compare" ? "Compare products" : view === "research" ? "Ask reviews" : view.charAt(0).toUpperCase() + view.slice(1);
     $("breadcrumb-page").textContent = pageLabel;
     $("page-title").textContent = viewCopy[view][0];
     $("page-subtitle").textContent = viewCopy[view][1];
@@ -195,7 +173,7 @@
     const demo = state.dataset === "demo", banner = $("provenance-banner");
     $("breadcrumb-workspace").textContent = demo ? "Demo workspace" : "My workspace";
     banner.classList.toggle("workspace-banner", !demo);
-    banner.querySelector("p").replaceChildren(node("strong", "", demo ? "Demo workspace" : "Your local workspace"), node("span", "", demo ? "You're exploring fictional reviews. Import or collect reviews to work with your own data." : "Reviews and saved reports are stored on this device. External analysis only runs when you choose it."));
+    banner.querySelector("p").replaceChildren(node("strong", "", demo ? "Demo workspace" : "Your local workspace"), node("span", "", demo ? state.showcase ? "Fictional reviews in a separate workspace. External integrations are off here." : "You're exploring fictional reviews. Import or collect reviews to work with your own data." : "Reviews and saved reports are stored on this device. External analysis only runs when you choose it."));
     banner.querySelector(".badge").textContent = demo ? "SAMPLE DATA" : "LOCAL DATA";
   }
   function syncFilters() {
@@ -257,7 +235,7 @@
     const banner = $("provenance-banner");
     banner.classList.toggle("workspace-banner", !data.dataset.is_demo);
     const description = banner.querySelector("p");
-    description.replaceChildren(node("strong", "", data.dataset.is_demo ? "Demo workspace" : "Your local workspace"), node("span", "", data.dataset.is_demo ? "You're exploring fictional reviews. Import or collect reviews to work with your own data." : "Reviews and saved reports are stored on this device. External analysis only runs when you choose it."));
+    description.replaceChildren(node("strong", "", data.dataset.is_demo ? "Demo workspace" : "Your local workspace"), node("span", "", data.dataset.is_demo ? state.showcase ? "Fictional reviews in a separate workspace. External integrations are off here." : "You're exploring fictional reviews. Import or collect reviews to work with your own data." : "Reviews and saved reports are stored on this device. External analysis only runs when you choose it."));
     banner.querySelector(".badge").textContent = data.dataset.is_demo ? "SAMPLE DATA" : "LOCAL DATA";
     $("updated-label").textContent = data.last_updated ? `Data added ${dateLabel(data.last_updated)}` : "Stored on this device";
     renderStats(summary);
@@ -710,6 +688,7 @@
     if (job.result?.retry_after != null && Number.isFinite(Number(job.result.retry_after))) card.append(node("p", "job-detail", `Provider retry guidance: wait at least ${number(Math.ceil(Number(job.result.retry_after)))} seconds before trying again. No automatic retry or paid fallback will run.`));
     const diagnostics = describeProviderDiagnostics(job.result?.diagnostics || (job.result?.error_code === "rate_limit" ? {rate_limit_source: "unknown"} : null));
     if (diagnostics) card.append(node("p", "job-detail", diagnostics));
+    card.append(window.ReviewdeskUI.execution(job));
     const actions = node("div", "job-actions");
     if (isActive && job.kind === "auth" && job.status === "running" && job.phase === "awaiting_login") {
       const note = node("p", "field-help", "Complete sign-in in the opened browser, then save the session here."); card.append(note);
@@ -750,7 +729,9 @@
   function preserveJobFocus(container, render) {
     const focused = container.contains(document.activeElement) ? document.activeElement : null;
     const id = focused?.dataset.jobId, action = focused?.dataset.jobAction;
+    const expanded = new Set([...container.querySelectorAll("details[data-execution-job][open]")].map((item) => item.dataset.executionJob));
     render();
+    for (const item of container.querySelectorAll("details[data-execution-job]")) item.open = expanded.has(item.dataset.executionJob);
     if (id && action) [...container.querySelectorAll("button[data-job-id]")].find((control) => control.dataset.jobId === id && control.dataset.jobAction === action && !control.disabled)?.focus({ preventScroll: true });
   }
   function renderAutomation() {
@@ -945,6 +926,7 @@
     }
   }
   function openSettings() {
+    if (state.showcase) { toast("External integrations are off in this showcase. No key is needed to explore it."); return; }
     $("provider-key").value = ""; state.providerPolicyDirty = false; providerMessage(""); setMenu(false);
     $("settings-dialog").showModal(); loadProvider();
   }
@@ -1149,6 +1131,7 @@
   }
   function researchCard(job) {
     const result = job.result, card = node("article", "panel research-answer");
+    card.append(window.ReviewdeskUI.execution(job));
     const question = node("div", "research-question-line"); question.append(icon("message"), node("h3", "", job.options?.question || result?.question || "Review question")); card.append(question);
     const provenance = node("div", "research-answer-meta");
     provenance.append(node("span", "badge", result?.method === "local" ? "LOCAL STATISTICS" : result?.method === "local_evidence" ? "LOCAL EVIDENCE" : job.status === "succeeded" ? result.cache_hit ? "SAVED AI ANSWER" : "OPENROUTER FREE" : String(job.status).toUpperCase()), node("span", "", timeLabel(job.updated_at)));
@@ -1213,456 +1196,60 @@
     }
     return card;
   }
-  const buyingPriorityNames = {calls: "Clear calls", comfort: "Comfort", sound: "Sound", battery: "Battery life", durability: "Durability", overall: "Everyday use"};
-  function buyingPriorities() { return [...document.querySelectorAll('[name="buying-priority"]:checked')].map((input) => input.value).sort(); }
-  function setBuyingCompare(enabled) {
-    $("buying-second-wrap").hidden = !enabled; $("buying-second").required = enabled;
-    $("buying-compare").setAttribute("aria-expanded", String(enabled));
-    $("buying-compare").textContent = enabled ? "Remove comparison" : "Compare another product";
-    if (!enabled) $("buying-second").value = "";
-  }
-  function fillBuyingForm(options) {
-    $("buying-product").value = options.asins?.[0] || "";
-    setBuyingCompare(Boolean(options.asins?.[1])); $("buying-second").value = options.asins?.[1] || "";
-    for (const input of document.querySelectorAll('[name="buying-priority"]')) input.checked = Boolean(options.priorities?.includes(input.value));
-    $("buying-consent").checked = false;
-  }
-  function syncBuyingProducts() {
-    const products = state.overview?.products || [], select = $("buying-suggestions");
-    const key = JSON.stringify(products.map((product) => [product.asin, product.name]));
-    if (select.dataset.products === key) return;
-    select.dataset.products = key; state.briefRenderKey = "";
-    select.replaceChildren(...products.map((product) => { const option = node("option"); option.value = product.asin; option.label = productLabel(product); return option; }));
-  }
-  function updateBuyingControls() {
-    const active = state.automation?.active_job, busy = Boolean(active && activeStatuses.has(active.status));
-    const router = routerStatus(), ownsJob = busy && active.kind === "brief" && active.options.dataset === state.dataset;
-    $("buying-submit").disabled = !state.automation || state.mutation || busy;
-    for (const input of $("buying-form").querySelectorAll("input")) input.disabled = ownsJob;
-    $("buying-consent").disabled = ownsJob || !router.configured;
-    $("buying-compare").disabled = ownsJob; $("buying-example").disabled = ownsJob || !state.overview?.products.length;
-    $("buying-demo").disabled = busy; $("buying-ai-setup").hidden = router.configured;
-    const policy = state.provider?.require_zdr === true ? "Zero retention is required." : state.provider?.require_zdr === false ? "Zero retention is off; provider and account logging settings may retain shared text." : "Check the saved AI privacy settings before sharing.";
-    $("buying-ai-status").textContent = router.configured ? `Optional AI uses at most one free request for this brief, including a comparison. ${policy}` : "Local evidence works without an API key. AI interpretation is optional and can be set up in the research workspace.";
-  }
-  function buyingChanged() {
-    state.briefDirty = true; state.briefJobId = null; $("buying-consent").checked = false;
-    messageAt("buying-error", ""); renderBuying();
-  }
-  async function startBuying(products, priorities, external) {
-    const job = await createJob({kind: "brief", dataset: state.dataset, products, priorities, allow_external: external}, "buying-error");
-    if (job) {
-      state.briefJobId = job.id; state.briefDirty = false; state.briefHydrated = true; state.briefAwaitingResult = true;
-      fillBuyingForm(job.options); state.briefRenderKey = ""; renderBuying();
-    }
-    updateBuyingControls();
-  }
-  async function submitBuying(event) {
-    event.preventDefault(); const products = [$("buying-product").value.trim()];
-    if (!$("buying-second-wrap").hidden) products.push($("buying-second").value.trim());
-    await startBuying(products, buyingPriorities(), $("buying-consent").checked && routerStatus().configured);
-  }
-  function briefSources(sources, dataset, contexts = []) {
-    const container = node("div", "brief-sources");
-    for (const source of sources) {
-      const entry = node("div", "evidence-card");
-      entry.append(node("strong", "source-product-name", productName(source.asin)), node("span", "product-id", `ASIN ${source.asin}`));
-      const quotes = source.quotes?.length ? source.quotes : [source.quote];
-      for (const quote of quotes) entry.append(node("blockquote", "", quote));
-      const context = contexts.find((item) => item.asin === source.asin && item.review_id === source.review_id);
-      if (context) {
-        const full = node("details", "brief-source-details");
-        full.append(node("summary", "", "Read the full excerpt shown to AI"), node("p", "field-help", context.title), node("blockquote", "", context.body));
-        entry.append(full);
-      }
-      if (source.rating) entry.append(node("p", "field-help", `Source review rating: ${average(source.rating)} / 5. The rating alone does not describe this passage's sentiment.`));
-      const open = button("Read original review", "text-button", () => openEvidence(source, dataset, open), "arrow");
-      entry.append(open); container.append(entry);
-    }
-    return container;
-  }
-  function briefFinding(finding, dataset) {
-    const card = node("div", "brief-finding");
-    card.append(node("span", "brief-priority", buyingPriorityNames[finding.priority] || "Owner experience"), node("p", "", finding.text));
-    const details = node("details", "brief-source-details");
-    details.append(node("summary", "", `Check ${plural(finding.evidence.length, "source review")}`), briefSources(finding.evidence, dataset));
-    card.append(details); return card;
-  }
-  function collectForBuying(asin) {
-    if (state.dataset !== "workspace") chooseDataset("workspace");
-    $("buying-product").value = asin; state.briefDirty = true;
-    $("collection-urls").value = `https://www.amazon.in/dp/${asin}`;
-    $("collection-pages").value = "10"; $("collection-resume").checked = true;
-    navigate("collection", true); $("collection-urls").focus();
-    toast("Product prepared for collection. Check sign-in and the page limit, then start when ready. Return to Buying brief afterwards.");
-  }
-  function buyingComparison(result) {
-    const panel = node("section", "panel brief-comparison"); panel.append(node("h3", "", "Your priorities, side by side"), node("p", "field-help", "Compare selected owner reports on the same priorities. These are examples, not a measurement of how common an issue is or which product is best."));
-    const wrap = node("div", "table-scroll"), table = node("table", "brief-comparison-table"), head = node("thead"), header = node("tr");
-    const priority = node("th", "", "Your priority"); priority.scope = "col"; header.append(priority);
-    for (const product of result.products) {
-      const cell = node("th"); cell.scope = "col";
-      const name = node("strong", "", product.name || productName(product.asin)); name.title = name.textContent;
-      cell.append(name, node("span", "product-id", product.asin), node("p", "field-help", `${number(product.selected_reviews)} of ${plural(product.stored_reviews, "stored review")} selected for context`)); header.append(cell);
-    }
-    head.append(header); table.append(head); const body = node("tbody");
-    for (const key of result.priorities.length ? result.priorities : ["overall"]) {
-      const row = node("tr"), heading = node("th", "", buyingPriorityNames[key]); heading.scope = "row"; row.append(heading);
-      for (const product of result.products) {
-        const cell = node("td"); let found = false;
-        for (const [section, label] of [["benefits", "Appreciated"], ["concerns", "Reported concern"]]) {
-          const finding = product[section]?.find((item) => item.priority === key); if (!finding) continue;
-          found = true; const item = node("div", "comparison-finding"); item.append(node("strong", "brief-priority", label), node("p", "", finding.text));
-          const sources = node("details", "brief-source-details"); sources.append(node("summary", "", "Check owner evidence"), briefSources(finding.evidence, result.dataset)); item.append(sources); cell.append(item);
-        }
-        if (!found) cell.append(node("p", "field-help", "No supported finding was returned for this priority. More evidence is needed."));
-        row.append(cell);
-      }
-      body.append(row);
-    }
-    table.append(body); wrap.append(table); panel.append(wrap);
-    for (const finding of result.tradeoffs) panel.append(briefFinding(finding, result.dataset));
-    return panel;
-  }
-  function renderBuying() {
-    if (!$("buying-results")) return;
-    updateBuyingControls();
-    const jobs = (state.automation?.jobs || []).filter((job) => job.kind === "brief" && job.options?.dataset === state.dataset);
-    const active = state.automation?.active_job;
-    const job = state.briefJobId ? jobs.find((item) => item.id === state.briefJobId) || (active?.id === state.briefJobId ? active : null) : state.briefDirty ? null : jobs[0];
-    $("buying-saved-shortcut").hidden = job?.status !== "succeeded" || !job.result?.products;
-    if (!state.briefHydrated && job && !state.briefDirty) { fillBuyingForm(job.options); state.briefHydrated = true; }
-    const progress = active?.kind === "brief" && active.options.dataset === state.dataset && activeStatuses.has(active.status) ? active : null;
-    $("buying-progress").hidden = !progress;
-    const progressKey = JSON.stringify(progress);
-    if ($("buying-progress").dataset.key !== progressKey) {
-      $("buying-progress").dataset.key = progressKey;
-      preserveJobFocus($("buying-progress"), () => {
-        $("buying-progress").replaceChildren();
-        if (progress) {
-          const heading = node("h3", "", progress.phase === "analysing" ? "Writing your buying brief" : "Finding owner evidence");
-          const stop = jobAction("Stop safely", progress, () => mutateJob(progress, "cancel"), "close"); stop.disabled = progress.status === "cancelling";
-          $("buying-progress").append(heading, node("p", "field-help", "Your saved reviews stay available. Free AI can take a little while; you can stop this check safely."), stop);
-        }
-      });
-    }
-    const key = JSON.stringify([job?.id, job?.status, job?.updated_at, job?.result, state.briefDirty]);
-    if (state.briefRenderKey === key) return;
-    state.briefRenderKey = key; const container = $("buying-results"); container.replaceChildren();
-    $("buying-empty").hidden = Boolean(job || progress);
-    if (!job || activeStatuses.has(job.status)) return;
-    if (job.status !== "succeeded" || !job.result?.products) {
-      const panel = node("section", "panel brief-recovery");
-      panel.append(node("h2", "", "This brief could not finish"), node("p", "", job.detail || "Your saved reviews remain available."), button("Show local owner evidence", "button button-white", () => startBuying(job.options.asins, job.options.priorities, false), "search"));
-      container.append(panel); return;
-    }
-    const result = job.result, ai = result.method === "openrouter";
-    const intro = node("section", "brief-result-heading");
-    intro.append(node("span", "eyebrow", ai ? result.cache_hit ? "SAVED AI BUYING BRIEF" : "AI BUYING BRIEF" : "LOCAL OWNER EVIDENCE"), node("h2", "", result.products.length === 2 ? "Compare the tradeoffs" : "Your buying brief"), node("p", "muted", `Saved ${timeLabel(job.updated_at)}. Rebuild to check the latest stored evidence.`));
-    const tags = node("div", "brief-tags");
-    for (const priority of result.priorities.length ? result.priorities : ["overall"]) tags.append(node("span", "badge", buyingPriorityNames[priority]));
-    tags.append(node("span", "badge", "CURRENT PRICE NOT CHECKED")); intro.append(tags); container.append(intro);
-    if (result.notice) {
-      const validationFailure = ["report_format", "evidence_reference", "evidence_quote", "invalid_json", "invalid_response"].includes(result.notice.code);
-      const notice = node("div", "research-notice"); notice.append(node("strong", "", validationFailure ? "The AI interpretation did not pass checks" : "AI unavailable; owner evidence is still here"), node("p", "", validationFailure ? "The response could not be accepted safely. Original owner reports remain available below; no unchecked buying recommendation is shown." : result.notice.message));
-      if (result.notice.retry_after != null) notice.append(node("p", "", `Try AI after ${new Date(new Date(job.updated_at).getTime() + Number(result.notice.retry_after) * 1000).toLocaleTimeString()}. No automatic retry was made.`));
-      container.append(notice);
-    }
-    if (!ai) container.append(node("p", "brief-local-explanation", "These are locally selected source passages, not an AI buying recommendation. Ratings and keyword matches alone cannot establish a product's strengths or weaknesses."));
-    const grid = node("div", "brief-product-grid");
-    for (const [productIndex, product] of result.products.entries()) {
-      const panel = node("article", "panel brief-product"), heading = node("header", "brief-product-heading");
-      if (result.products.length === 2) heading.append(node("span", "badge", productIndex === 0 ? "FIRST PRODUCT" : "SECOND PRODUCT"));
-      heading.append(node("h3", "", product.name || productName(product.asin)), node("span", "product-id", `ASIN ${product.asin}`));
-      const currentCount = state.overview?.products.find((item) => item.asin === product.asin)?.review_count;
-      heading.append(node("p", "brief-rating", `${average(product.average_rating)} / 5 · ${plural(product.stored_reviews, "stored review")}`), node("p", "field-help", `${number(product.selected_reviews)} reviews selected for context. ${product.last_review_added_at ? `Reviews last added ${dateLabel(product.last_review_added_at)}.` : "Collection date unavailable."}`));
-      panel.append(heading);
-      if (currentCount != null && currentCount !== product.stored_reviews) panel.append(node("p", "research-notice", "The saved review count has changed. Rebuild this brief to include the current collection."));
-      if (!product.stored_reviews || !product.selected_reviews) {
-        panel.append(node("h4", "", product.stored_reviews ? "No matching owner text yet" : "No saved reviews yet"), node("p", "field-help", "This brief needs relevant saved review text. No AI request was made for an incomplete comparison."));
-        if (state.dataset === "workspace") panel.append(button("Collect reviews for this product", "button button-white", () => collectForBuying(product.asin), "layers"));
-        panel.append(button("Import a review CSV", "text-button", openImport, "upload"));
-      } else if (ai) {
-        for (const [field, title] of [["benefits", "What owners appreciate"], ["concerns", "What deserves attention"]]) {
-          const section = node("section", `brief-section brief-${field}`); section.append(node("h4", "", title));
-          if (!product[field]?.length) section.append(node("p", "field-help", "No supported finding was returned for this section. This does not establish that none exists."));
-          for (const finding of product[field] || []) section.append(briefFinding(finding, result.dataset)); panel.append(section);
-        }
-        const unknowns = node("section", "brief-section brief-unknowns"); unknowns.append(node("h4", "", "What remains uncertain"));
-        const list = node("ul");
-        for (const note of [...product.uncertainties, "Current price, exact specifications and long-term failure rates were not established."]) list.append(node("li", "", note));
-        unknowns.append(list); panel.append(unknowns);
-      } else {
-        const details = node("details", "brief-source-details"); details.open = true;
-        details.append(node("summary", "", "Read selected owner reports"), briefSources(product.source_examples || [], result.dataset)); panel.append(details);
-      }
-      if (product.stored_reviews) panel.append(button("Explore all saved reviews", "text-button", () => exploreProduct(product.asin), "arrow"));
-      grid.append(panel);
-    }
-    if (result.products.length === 2 && ai) {
-      container.append(buyingComparison(result));
-      const details = node("details", "brief-product-details"); details.append(node("summary", "", "Explore each product and its full findings"), grid); container.append(details);
-    } else container.append(grid);
-    if (result.products.length === 2 && !ai) {
-      const comparison = node("section", "panel brief-comparison"); comparison.append(node("h3", "", "How the evidence compares"));
-      for (const [index, product] of result.products.entries()) comparison.append(node("p", "field-help", `${index === 0 ? "First" : "Second"} product: ${product.name || productName(product.asin)}`));
-      for (const finding of result.tradeoffs) comparison.append(briefFinding(finding, result.dataset));
-      if (!result.tradeoffs.length) comparison.append(node("p", "field-help", "No source-supported comparison was accepted. Compare the owner reports above; the collected evidence does not establish an overall winner."));
-      container.append(comparison);
-    }
-    const limits = node("section", "panel brief-limits"); limits.append(node("h3", "", "Keep these limits in view"));
-    const list = node("ul"); for (const note of result.limitations) list.append(node("li", "", note)); limits.append(list);
-    const process = node("details", "brief-source-details"); process.append(node("summary", "", "How this brief was made"), node("p", "field-help", "Python computes the stored ratings. Local retrieval selects up to 12 relevant reviews per product, balancing available rating groups. Optional AI interprets those excerpts. Every accepted finding links to supplied source text; that check does not guarantee the interpretation."), usageSummary(result.usage, result.model));
-    if (ai && result.cache_hit) process.append(node("p", "field-help", "Reused a revalidated saved interpretation without a new model request."));
-    limits.append(process); container.append(limits);
-    if (state.briefAwaitingResult && state.view === "buying") {
-      state.briefAwaitingResult = false;
-      container.scrollIntoView({behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start"});
-    }
-  }
-  function updateComparisonControls() {
-    const active = state.automation?.active_job, busy = Boolean(active && activeStatuses.has(active.status));
-    const owned = busy && active.kind === "comparison" && active.options.dataset === state.dataset;
-    for (const input of $("compare-form").querySelectorAll("input, select")) input.disabled = owned;
-    $("compare-submit").disabled = !state.automation || state.mutation || busy || state.comparePreviewBusy;
-    $("compare-submit").firstChild.textContent = state.comparePreview?.collection_planned ? "Collect and compare" : "Compare products";
-    $("compare-example").disabled = owned || !state.overview || state.overview.products.length < 2;
-    for (const control of document.querySelectorAll("[data-compare-focus]")) control.disabled = owned;
-    $("compare-consent").disabled = owned || !routerStatus().configured;
-    $("compare-collect").disabled = owned || state.dataset === "demo";
-    if (state.dataset === "demo") $("compare-collect").checked = false;
-    $("compare-pages").disabled = owned || !$("compare-collect").checked;
-    const policy = state.provider?.require_zdr ? "Zero retention is required." : "Zero retention is off; enabled provider or account logging may retain shared text.";
-    const quota = state.providerQuota, allowance = quota?.quota?.available && Date.now() < Number(quota.resets_at) * 1000 ? ` Last checked: ${number(quota.quota.remaining)} / ${number(quota.quota.limit)} account requests left. Refresh in AI settings.` : " Check remaining requests in AI settings.";
-    const cooldown = state.provider?.retry_at && Date.now() < state.provider.retry_at * 1000 ? ` Free AI paused until ${new Date(state.provider.retry_at * 1000).toLocaleTimeString()}.` : "";
-    $("compare-ai-status").textContent = routerStatus().configured ? `At most one free AI attempt, with no automatic retry. ${policy}${allowance}${cooldown}` : "Local comparison works without a key. Connect OpenRouter in AI settings for optional interpretation.";
-  }
-  function comparisonChanged() {
-    state.compareDirty = true; state.compareJobId = null; state.compareRenderKey = "";
-    $("compare-consent").checked = false; messageAt("compare-error", ""); renderComparison(); scheduleComparisonPreview();
-  }
-  function comparisonPayload(external = false) {
-    return {kind: "comparison", dataset: state.dataset, products: [$("compare-first").value.trim(), $("compare-second").value.trim()],
-      collect_missing: $("compare-collect").checked && state.dataset === "workspace", max_pages: Number($("compare-pages").value),
-      target_reviews: Number($("compare-target").value), focus: $("compare-focus").value.trim(), allow_external: external};
-  }
-  function scheduleComparisonPreview() {
-    clearTimeout(state.comparePreviewTimer); const sequence = ++state.comparePreviewSeq;
-    state.comparePreview = null; state.comparePreviewBusy = false;
-    const payload = comparisonPayload();
-    if (payload.products.some((value) => !value)) {
-      $("compare-preview").replaceChildren(node("p", "field-help", "Paste both links to check product names, saved reviews and the plan. No collection or AI request starts here.")); updateComparisonControls(); return;
-    }
-    state.comparePreviewBusy = true; $("compare-preview").replaceChildren(node("p", "field-help", "Checking links and saved reviews...")); updateComparisonControls();
-    state.comparePreviewTimer = setTimeout(async () => {
-      try {
-        const preview = await postJson("/api/comparison/preview", payload);
-        if (sequence !== state.comparePreviewSeq) return;
-        state.comparePreview = preview; const panel = $("compare-preview"); panel.replaceChildren(node("h3", "", "Before you start"));
-        for (const product of preview.products) {
-          const row = node("div", "compare-preview-product");
-          row.append(node("strong", "", product.name || `New product ${product.asin}`), node("span", "product-id", product.asin),
-            node("p", "field-help", `${plural(product.stored_reviews, "saved review")}. ${product.available_pages_ended ? "Available review pages ended; using the saved sample." : product.planned_pages ? `Up to ${plural(product.planned_pages, "new page")} planned.` : "Reusing saved evidence."}`)); panel.append(row);
-        }
-        panel.append(node("p", "field-help", preview.detail));
-        if (preview.needs_session) {
-          panel.append(node("p", "research-notice", "Connect Amazon before gathering new reviews. You can still compare any evidence already saved."), button("Connect Amazon", "button button-white", async () => { const job = await createJob({kind: "auth"}, "compare-error"); if (job) navigate("collection", true); }, "external"));
-        } else if (preview.collection_planned) panel.append(node("p", "field-help", "Saved session available. Amazon checks it during collection; sign-in or CAPTCHA may need your attention."));
-      } catch (error) {
-        if (sequence !== state.comparePreviewSeq) return;
-        $("compare-preview").replaceChildren(node("p", "research-notice", error.message || "Could not check the links. Your saved data is unchanged."));
-      } finally { if (sequence === state.comparePreviewSeq) { state.comparePreviewBusy = false; updateComparisonControls(); } }
-    }, 350);
-  }
-  function fillComparisonForm(options) {
-    $("compare-first").value = options.urls?.[0] || options.asins?.[0] || "";
-    $("compare-second").value = options.urls?.[1] || options.asins?.[1] || "";
-    $("compare-collect").checked = Boolean(options.collect_missing);
-    $("compare-pages").value = String(options.max_pages || 3);
-    $("compare-target").value = String(options.target_reviews || 30); $("compare-focus").value = options.focus || "";
-    $("compare-consent").checked = false;
-    scheduleComparisonPreview();
-  }
-  async function submitComparison(event) {
-    event.preventDefault();
-    const job = await createJob(comparisonPayload($("compare-consent").checked && routerStatus().configured), "compare-error");
-    if (job) {
-      state.compareJobId = job.id; state.compareDirty = false; state.compareHydrated = true; state.compareRenderKey = "";
-      state.compareAwaitingResult = true;
-      fillComparisonForm(job.options); renderComparison();
-    }
-    updateComparisonControls();
-  }
-  function exportComparison(result) {
-    const lines = ["Reviewdesk product comparison", `Priorities: ${result.focus || "General owner experience"}`,
-      `Method: ${result.method === "openrouter" ? "AI interpretation with original owner sources" : "Local owner evidence, no accepted AI interpretation"}`,
-      "This is a saved review sample, not complete Amazon coverage. Findings need human review.", ""];
-    for (const product of result.products) {
-      lines.push(product.name || productName(product.asin), `https://www.amazon.in/dp/${product.asin}`,
-        `${product.stored_reviews} stored reviews; ${product.selected_reviews} selected for context; average rating ${average(product.average_rating)} / 5.`, "");
-      for (const [field, title] of [["benefits", "Reason to consider"], ["concerns", "Check before buying"]]) {
-        for (const finding of product[field] || []) {
-          lines.push(`${title}: ${finding.aspect}`, finding.text);
-          for (const source of finding.evidence || []) for (const quote of source.quotes || [source.quote]) lines.push(`Owner quote: ${quote}`);
-          lines.push("");
-        }
-      }
-      if (result.method !== "openrouter") for (const source of product.source_examples || []) lines.push(`Owner quote: ${source.quote}`);
-      for (const note of product.uncertainties || []) lines.push(`Unknown: ${note}`);
-      lines.push("");
-    }
-    if (result.coverage?.target_reviews) lines.push(`Sample target: ${result.coverage.target_reviews} reviews per product. Reached: ${result.coverage.target_met ? "yes" : "no"}.`);
-    if (result.notice) lines.push(`AI notice: ${result.notice.message}`);
-    lines.push("", "Evidence limits", ...result.limitations);
-    const blob = new Blob([lines.join("\n")], {type: "text/plain;charset=utf-8"}), url = URL.createObjectURL(blob), link = node("a");
-    link.href = url; link.download = `reviewdesk-comparison-${result.asins.join("-")}.txt`;
-    document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
-  }
-  function comparisonDecisionMatrix(result) {
-    const panel = node("section", "panel compare-decision");
-    panel.append(node("h3", "", "What changes the decision"), node("p", "field-help", "Read the reason to consider each product beside its main concern. These are selected owner accounts, not verified specifications or measured failure rates."));
-    const wrap = node("div", "table-scroll"), table = node("table", "brief-comparison-table"), head = node("thead"), header = node("tr");
-    header.append(node("th", "", "Owner evidence"));
-    for (const product of result.products) {
-      const th = node("th"); th.scope = "col"; th.title = product.name || productName(product.asin);
-      th.append(node("strong", "", th.title), node("span", "product-id", product.asin)); header.append(th);
-    }
-    head.append(header); table.append(head); const body = node("tbody");
-    for (const [field, title] of [["benefits", "Reason to consider"], ["concerns", "Check before buying"]]) {
-      const row = node("tr"), label = node("th", "", title); label.scope = "row"; row.append(label);
-      for (const product of result.products) {
-        const cell = node("td"), finding = product[field]?.[0];
-        if (finding) {
-          cell.append(node("strong", "brief-priority", finding.aspect), node("p", "comparison-headline", finding.text));
-          const sources = node("details", "brief-source-details"); sources.append(node("summary", "", `Check ${plural(finding.evidence.length, "source review")}`), briefSources(finding.evidence, result.dataset, result.source_context)); cell.append(sources);
-        } else cell.append(node("p", "field-help", "No supported finding was returned. This is a gap in the evidence, not proof that the issue is absent."));
-        row.append(cell);
-      }
-      body.append(row);
-    }
-    const unknowns = node("tr"), unknownLabel = node("th", "", "Still unanswered"); unknownLabel.scope = "row"; unknowns.append(unknownLabel);
-    for (const product of result.products) {
-      const cell = node("td");
-      for (const note of product.uncertainties?.length ? product.uncertainties : ["Current prices, specifications and long-term reliability were not independently verified."]) cell.append(node("p", "field-help", note));
-      unknowns.append(cell);
-    }
-    body.append(unknowns); table.append(body); wrap.append(table); panel.append(wrap); return panel;
-  }
-  function renderComparison() {
-    updateComparisonControls();
-    const authKey = state.automation?.auth?.status;
-    if (state.compareAuthKey !== authKey) { state.compareAuthKey = authKey; scheduleComparisonPreview(); }
-    const jobs = (state.automation?.jobs || []).filter((job) => job.kind === "comparison" && job.options.dataset === state.dataset);
-    const active = state.automation?.active_job;
-    const current = active?.kind === "comparison" && active.options.dataset === state.dataset ? active : null;
-    const job = state.compareJobId ? jobs.find((item) => item.id === state.compareJobId) || (current?.id === state.compareJobId ? current : null) : state.compareDirty ? null : jobs[0];
-    $("compare-saved-shortcut").hidden = !job?.result?.products || activeStatuses.has(job.status);
-    if (!state.compareHydrated && job && !state.compareDirty) { fillComparisonForm(job.options); state.compareHydrated = true; updateComparisonControls(); }
-    $("compare-progress").hidden = !current;
-    const progressKey = JSON.stringify(current);
-    if ($("compare-progress").dataset.key !== progressKey) {
-      $("compare-progress").dataset.key = progressKey;
-      preserveJobFocus($("compare-progress"), () => {
-        $("compare-progress").replaceChildren();
-        if (current) {
-          const stop = jobAction("Stop safely", current, () => mutateJob(current, "cancel"), "close"); stop.disabled = current.status === "cancelling";
-          $("compare-progress").append(node("h3", "", current.phase === "collecting" ? "Collecting missing reviews" : current.phase === "analysing" ? "Comparing owner experiences" : "Preparing your comparison"), node("p", "field-help", current.detail), stop);
-          if (current.progress?.asin) $("compare-progress").append(node("p", "field-help", `${productName(current.progress.asin)}: ${number(current.progress.pages_processed || 0)} pages processed, ${number(current.progress.inserted || 0)} new reviews in this product's current pass.`));
-        }
-      });
-    }
-    const key = JSON.stringify([job?.id, job?.updated_at, state.compareDirty, state.overview?.products]);
-    if (state.compareRenderKey === key) return;
-    state.compareRenderKey = key;
-    const container = $("compare-results"); container.replaceChildren(); $("compare-empty").hidden = Boolean(job || current);
-    if (!job || activeStatuses.has(job.status)) return;
-    const result = job.result;
-    if (!result?.products) {
-      const recovery = node("section", "panel brief-recovery");
-      recovery.append(node("h3", "", "Pick up where you left off"), node("p", "research-notice", job.detail || "The comparison could not finish. Saved reviews remain available."), button("Prepare a safe resume", "button button-white", () => { fillComparisonForm({...job.options, collect_missing: state.dataset === "workspace"}); state.compareDirty = true; state.compareJobId = null; state.compareRenderKey = ""; navigate("compare", true); toast("Saved progress prepared. Review the plan, then start. AI sharing is off."); })); container.append(recovery); return;
-    }
-    const ai = result.method === "openrouter", summary = node("section", "panel brief-summary");
-    summary.append(node("span", "badge", ai ? "AI INTERPRETATION + OWNER SOURCES" : "LOCAL OWNER EVIDENCE"), node("h2", "", "Your product comparison"));
-    const relation = {alternatives: "The AI considers these potential alternatives. Check that their variants and intended uses match.", different_uses: "These products serve different purposes. Compare their owner experiences separately; there is no meaningful overall winner.", uncertain: "The evidence does not establish whether these products are direct alternatives."};
-    summary.append(node("p", "field-help", relation[result.relationship] || relation.uncertain));
-    summary.append(button("Save comparison with sources", "text-button", () => exportComparison(result), "download"));
-    if (result.focus) summary.append(node("p", "compare-focus-note", `Your priorities: ${result.focus}`));
-    const coverage = result.coverage;
-    if (coverage?.target_reviews) {
-      const note = node("section", "compare-coverage"); note.append(node("strong", "", coverage.target_met ? "Sample target reached" : "Your sample is still growing"));
-      note.append(node("p", "field-help", result.products.map((product) => `${product.name || productName(product.asin)}: ${number(product.stored_reviews)} / ${number(coverage.target_reviews)} reviews`).join(". ")));
-      if (!coverage.target_met && state.dataset === "workspace") {
-        if (coverage.needs_more.some((asin) => !coverage.available_pages_ended?.includes(asin))) note.append(button("Prepare to resume collection", "text-button", () => { fillComparisonForm({...job.options, collect_missing: true}); comparisonChanged(); navigate("compare", true); toast("The plan will resume saved cursors for products below your target. AI sharing is off."); }, "refresh"));
-        else note.append(node("p", "field-help", "Available review pages have ended. The target remains unmet; a larger requested target does not create more accessible reviews."));
-      }
-      summary.append(note);
-    }
-    if (result.cache_hit) summary.append(node("p", "field-help", "Reused a source-checked saved interpretation. No new AI request."));
-    if (result.notice) summary.append(node("p", "research-notice", result.notice.message || "AI interpretation was unavailable. Local evidence is shown."));
-    if (result.products.some((product) => product.critical_rated_reviews === 0)) summary.append(node("p", "research-notice", "At least one sample has no 1 or 2 star reviews. Negative experiences may be underrepresented; a high sample rating is not proof of reliability."));
-    const timings = node("div", "compare-timings");
-    for (const [label, value] of [["Collection", result.timings.collection_seconds], ["Preparation", result.timings.preparation_seconds], [result.cache_hit ? "AI cache lookup" : "AI + validation", result.timings.ai_seconds], ["Total job", result.timings.total_seconds]]) {
-      const cell = node("div"); cell.append(node("span", "field-help", label), node("strong", "", `${Number(value || 0).toFixed(2)}s`)); timings.append(cell);
-    }
-    const timingDetails = node("details", "brief-source-details compare-timing-details");
-    timingDetails.append(node("summary", "", `${Number(result.timings.total_seconds || 0).toFixed(2)}s total · See collection and AI timings`), timings, node("p", "field-help", result.collection_mode === "saved_reviews" ? "Used saved review samples. Collection time is zero for this run; these are not fresh-download timings." : "Measured from the start of this job, excluding queue time. Collection includes browser startup and saved-page writes.")); summary.append(timingDetails);
-    if (result.collection) {
-      const collection = node("section", "compare-collection"); collection.append(node("h3", "", "Collection outcome"));
-      for (const product of result.collection.products || []) collection.append(node("p", "field-help", `${productName(product.asin)}: ${product.status}. ${number(product.inserted)} new reviews across ${number(product.pages_processed)} pages.${product.elapsed_seconds != null ? ` ${Number(product.elapsed_seconds).toFixed(2)}s.` : ""} ${product.detail || ""}`));
-      if (result.collection.detail) collection.append(node("p", "research-notice", result.collection.detail));
-      if (result.collection.status === "blocked") collection.append(button("Refresh Amazon sign-in", "button button-white", async () => { const job = await createJob({kind: "auth"}, "compare-error"); if (job) navigate("collection", true); }, "external"));
-      if (result.collection.status !== "completed") collection.append(node("p", "field-help", "This is a bounded or interrupted sample. Any findings below use only reviews that were actually saved."));
-      summary.append(collection);
-    }
-    container.append(summary);
-    if (ai) container.append(comparisonDecisionMatrix(result));
-    const wrap = node("div", "table-scroll panel"), table = node("table", "brief-comparison-table"), header = node("tr");
-    header.append(node("th", "", "Saved evidence"));
-    for (const product of result.products) { const th = node("th"); th.append(node("strong", "", product.name || productName(product.asin)), node("span", "product-id", product.asin)); th.scope = "col"; th.title = product.name || productName(product.asin); header.append(th); }
-    const head = node("thead"); head.append(header); table.append(head);
-    const body = node("tbody");
-    for (const [label, format] of [["Stored reviews", (p) => number(p.stored_reviews)], ["Average of rated reviews", (p) => `${average(p.average_rating)} / 5 (${number(p.rated_reviews)} rated)`], ["1 or 2 star reviews", (p) => number(p.critical_rated_reviews)], ["Selected for context", (p) => number(p.selected_reviews)]]) {
-      const row = node("tr"), title = node("th", "", label); title.scope = "row"; row.append(title);
-      for (const product of result.products) row.append(node("td", "", format(product))); body.append(row);
-    }
-    table.append(body); wrap.append(table); container.append(wrap);
-    const grid = node("div", "brief-product-grid");
-    for (const product of result.products) {
-      const panel = node("article", "panel brief-product"); panel.append(node("h3", "", product.name || productName(product.asin)), node("p", "product-id", `ASIN ${product.asin}`));
-      if (product.critical_rated_reviews === 0) panel.append(node("p", "research-notice", "This sample has no 1 or 2 star reviews. It may understate negative experiences."));
-      if (result.focus && product.focus_matched_reviews === 0) panel.append(node("p", "research-notice", "No lexical matches for your priorities were found. General context is shown; suitability remains unknown."));
-      const count = state.overview?.products.find((item) => item.asin === product.asin)?.review_count;
-      if (count != null && count !== product.stored_reviews) panel.append(node("p", "research-notice", "The saved sample has changed. Run again to compare the current evidence."));
-      if (!product.selected_reviews) {
-        panel.append(node("p", "research-notice", "No usable owner text is saved for this product. No AI request is made for an incomplete pair."), button("Open collection and sign-in", "text-button", () => { $("collection-urls").value = `https://www.amazon.in/dp/${product.asin}`; navigate("collection", true); }, "layers"));
-      } else if (ai) {
-        for (const [field, title] of [["benefits", "What owners appreciate"], ["concerns", "What deserves attention"]]) {
-          const section = node("section", "brief-section"); section.append(node("h4", "", title));
-          for (const finding of product[field] || []) {
-            const card = node("div", "brief-finding"), source = node("details", "brief-source-details");
-            card.append(node("strong", "brief-priority", finding.aspect), node("p", "", finding.text));
-            source.append(node("summary", "", "Check owner evidence"), briefSources(finding.evidence, result.dataset, result.source_context)); card.append(source); section.append(card);
-          }
-          if (!product[field]?.length) section.append(node("p", "field-help", "No supported finding returned. This does not establish that none exists."));
-          panel.append(section);
-        }
-        const unknowns = node("section", "brief-section"); unknowns.append(node("h4", "", "What remains uncertain"));
-        for (const note of [...(product.uncertainties || []), "Prices, specifications and authenticity were not independently verified. Owner reports can conflict; inspect the original text for counterevidence."]) unknowns.append(node("p", "field-help", note)); panel.append(unknowns);
-      } else {
-        const sources = node("details", "brief-source-details");
-        sources.append(node("summary", "", `Read ${number(product.source_examples?.length || 0)} selected owner reports`), briefSources(product.source_examples || [], result.dataset)); panel.append(sources);
-      }
-      if (product.stored_reviews) panel.append(button("Explore saved reviews", "text-button", () => exploreProduct(product.asin), "arrow")); grid.append(panel);
-    }
-    if (ai) {
-      const details = node("details", "brief-product-details"); details.append(node("summary", "", "Explore the full findings for each product"), grid); container.append(details);
-    } else container.append(grid);
-    const limits = node("section", "panel brief-limits"), list = node("ul"); limits.append(node("h3", "", "How to read this comparison"));
-    for (const limitation of result.limitations) list.append(node("li", "", limitation)); limits.append(list, usageSummary(result.usage, result.model)); container.append(limits);
-    if (state.compareAwaitingResult && state.view === "compare") {
-      state.compareAwaitingResult = false; container.scrollIntoView({behavior: "auto", block: "start"});
-    }
-  }
+  const {buyingPriorityNames, buyingPriorities, setBuyingCompare, fillBuyingForm, syncBuyingProducts, updateBuyingControls, buyingChanged, startBuying, submitBuying, briefSources, briefFinding, collectForBuying, buyingComparison, renderBuying} = window.ReviewdeskUI.createInspection({
+    $,
+    activeStatuses,
+    average,
+    button,
+    chooseDataset: (...args) => chooseDataset(...args),
+    createJob: (...args) => createJob(...args),
+    dateLabel: (...args) => dateLabel(...args),
+    empty: (...args) => empty(...args),
+    exploreProduct: (...args) => exploreProduct(...args),
+    jobAction: (...args) => jobAction(...args),
+    messageAt: (...args) => messageAt(...args),
+    mutateJob: (...args) => mutateJob(...args),
+    navigate: (...args) => navigate(...args),
+    node,
+    number,
+    openEvidence: (...args) => openEvidence(...args),
+    openImport: (...args) => openImport(...args),
+    plural,
+    preserveJobFocus: (...args) => preserveJobFocus(...args),
+    productLabel: (...args) => productLabel(...args),
+    productName: (...args) => productName(...args),
+    request: (...args) => request(...args),
+    routerStatus: (...args) => routerStatus(...args),
+    state,
+    timeLabel: (...args) => timeLabel(...args),
+    toast: (...args) => toast(...args),
+    usageSummary: (...args) => usageSummary(...args)
+  });
+  const {updateComparisonControls, comparisonChanged, comparisonPayload, scheduleComparisonPreview, fillComparisonForm, submitComparison, exportComparison, comparisonDecisionMatrix, renderComparison} = window.ReviewdeskUI.createComparison({
+    $,
+    activeStatuses,
+    average,
+    briefSources: (...args) => briefSources(...args),
+    button,
+    createJob: (...args) => createJob(...args),
+    empty: (...args) => empty(...args),
+    exploreProduct: (...args) => exploreProduct(...args),
+    jobAction: (...args) => jobAction(...args),
+    messageAt: (...args) => messageAt(...args),
+    mutateJob: (...args) => mutateJob(...args),
+    navigate: (...args) => navigate(...args),
+    node,
+    number,
+    plural,
+    postJson: (...args) => postJson(...args),
+    preserveJobFocus: (...args) => preserveJobFocus(...args),
+    productName: (...args) => productName(...args),
+    request: (...args) => request(...args),
+    routerStatus: (...args) => routerStatus(...args),
+    state,
+    toast: (...args) => toast(...args),
+    usageSummary: (...args) => usageSummary(...args)
+  });
   function renderResearch() {
     const active = state.automation?.active_job;
     const researchJob = active?.kind === "research" ? active : null;
@@ -1743,6 +1330,7 @@
     if (Number(scope.excluded_reviews) > 0 || scope.body_truncated) intro.append(node("p", "report-scope-note", `${number(scope.excluded_reviews)} reviews excluded.${scope.body_truncated ? " Some review text was shortened for analysis." : ""} Findings describe the analysed sample.`));
     container.append(intro);
     container.append(reportProcess(report));
+    if (cachedJob) container.append(window.ReviewdeskUI.execution(cachedJob));
     const ratingSection = node("section", "report-rating-section"), ratingTitle = node("div", "section-title");
     const ratingCopy = node("div"); ratingCopy.append(node("h2", "", "Rating signals"), node("p", "", "Based on star ratings, rather than inferred sentiment")); ratingTitle.append(ratingCopy); ratingSection.append(ratingTitle);
     const ratingGrid = node("div", "analysis-rating-grid");
@@ -1959,8 +1547,30 @@
   applyTheme(theme);
   window.addEventListener("hashchange", () => navigate(location.hash.slice(1), true));
   navigate(location.hash.slice(1));
-  loadOverview();
-  updateWorkflowControls();
-  loadAutomation();
-  loadProvider();
+  async function startWorkspace() {
+    let guide;
+    try {
+      const response = await request("/api/showcase"), manifest = await response.json();
+      if (manifest.enabled) {
+        state.showcase = true;
+        state.dataset = "demo";
+        $("dataset-select").value = "demo";
+        $("dataset-select").disabled = true;
+        guide = window.ReviewdeskUI.showcase(manifest, {
+          inspect: () => { $("buying-product").value = manifest.products[0].asin; state.briefDirty = true; state.briefJobId = null; navigate("buying", true); $("buying-product").focus(); },
+          compare: () => { fillComparisonForm({asins: manifest.products.slice(0, 2).map((item) => item.asin), collect_missing: false, max_pages: 1, target_reviews: 10, focus: "Battery life and quiet operation"}); state.compareDirty = true; state.compareJobId = null; navigate("compare", true); },
+          ask: () => { navigate("research", true); $("research-product").value = manifest.products[0].asin; $("research-question").value = "What do these reviews say about battery life?"; $("research-consent").checked = false; renderResearch(); $("research-question").focus(); },
+          source: (source, opener) => openEvidence(source, "demo", opener)
+        });
+        guide.ready(false);
+        $("collection-submit").title = "Collection is disabled in this offline showcase.";
+      }
+    } catch { /* The regular workspace stays usable if showcase information is unavailable. */ }
+    await loadOverview();
+    guide?.ready(Boolean(state.overview));
+    updateWorkflowControls();
+    loadAutomation();
+    loadProvider();
+  }
+  startWorkspace();
 })();
