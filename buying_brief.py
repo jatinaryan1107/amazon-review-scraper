@@ -1,13 +1,12 @@
 """A bounded, source-linked buying brief for one or two saved products."""
 
-from collections import deque
 import json
 import re
 import sqlite3
 
 from llm_analysis import _hash, _hydrate_evidence, _model_json, _wire_chunk
 from llm_provider import ProviderError, _cancel, chat_payload
-from research import _notice, _tokens, retrieve
+from research import _notice, _tokens
 from review_analysis import AnalysisCancelled
 from review_parser import extract_asin
 
@@ -136,51 +135,9 @@ def _validate(engine, raw, products, priorities, citations, exposed):
 
 
 def _prepare(engine, rows, options):
-    products, entries, exposed, fingerprints, identities, source_keys = [], [], {}, [], [], {}
+    from review_evidence import prepare_evidence
     question = " ".join(PRIORITIES[item] for item in options["priorities"]) or "overall experience strengths weaknesses"
-    for product_index, asin in enumerate(options["asins"], 1):
-        canonical, _, fingerprint, metadata = engine._prepare(rows, options["dataset"], asin)
-        fingerprints.append(fingerprint)
-        identities.append({row["review_id"] for row in canonical})
-        groups = [[], [], []]
-        rated, total_rating = 0, 0
-        for row in canonical:
-            rating = float(row["rating"]) if row["rating"] else None
-            if rating is not None:
-                rated += 1
-                total_rating += rating
-            groups[0 if rating is not None and rating <= 2 else 1 if rating is not None and rating >= 4 else 2].append(row)
-        queues = []
-        for group in groups:
-            selected, sources, _ = retrieve(engine, [row for row in group if (row["review_title"] + row["review_body"]).strip()], question)
-            queues.append(deque((item, sources[item["key"]]) for item in selected))
-        selected_rows, selected_ids = [], set()
-        while any(queues) and len(selected_rows) < 12:
-            for queue in queues:
-                if queue and len(selected_rows) < 12:
-                    item, source = queue.popleft()
-                    if source["review_id"] in selected_ids:
-                        continue
-                    selected_ids.add(source["review_id"])
-                    key = f"p{product_index}r{len(selected_rows) + 1}"
-                    source = {**source}
-                    exposed[key] = source
-                    source_key = source_keys.setdefault(source["review_id"], f"s{len(source_keys) + 1}")
-                    selected_rows.append({**item, "key": key, "product": f"p{product_index}", "source": source_key})
-        entries.extend(selected_rows)
-        examples = []
-        for item in selected_rows[:6]:
-            source = exposed[item["key"]]
-            quote = (item["body"] or item["title"])[:240]
-            if quote.strip():
-                examples.append({"asin": asin, "review_id": source["review_id"], "quote": quote,
-                                 "rating": source["rating"]})
-        products.append({"asin": asin, "stored_reviews": len(canonical), "selected_reviews": len(selected_rows),
-            "average_rating": total_rating / rated if rated else None, "rated_reviews": rated,
-            "positive_rated_reviews": len(groups[1]), "critical_rated_reviews": len(groups[0]),
-            "source_examples": examples, "metadata": metadata})
-    overlap = len(identities[0] & identities[1]) if len(identities) == 2 else 0
-    return products, entries, exposed, _hash(fingerprints), overlap
+    return prepare_evidence(engine, rows, dataset=options["dataset"], asins=options["asins"], question=question)
 
 
 def build_brief(engine, rows, *, dataset, products, priorities, allow_external=False, cancelled=None, on_progress=None):

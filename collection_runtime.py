@@ -195,11 +195,13 @@ def run_collection(urls, db_path, auth_file, *, max_pages=3, resume=True,
                     if _is_set(cancelled):
                         _save_session(context, auth_file)
                         return finish("paused", "Cancelled. Saved progress is retained.", True)
+                    product_started = time.monotonic()
                     report = collect_product(
                         tool, store, url, max_pages=max_pages, resume=resume,
                         restart=restart, replay_limit=replay_limit,
                         on_progress=on_progress, cancelled=lambda: _is_set(cancelled),
                     )
+                    report["elapsed_seconds"] = round(time.monotonic() - product_started, 3)
                     reports.append(report)
                     _notify(on_progress, {**report, "event": "product_finished"})
                     if report.get("cancelled"):

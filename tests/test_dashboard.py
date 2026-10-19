@@ -612,6 +612,64 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(job["result"]["usage"]["calls"], calls)
         self.assertEqual(len(sent), 1)
 
+    def wait_comparison(self, payload):
+        status, _, content = self.post_json("/api/jobs", {"kind": "comparison", "dataset": "workspace", **payload})
+        self.assertEqual(status, 202, content)
+        job_id = json.loads(content)["job"]["id"]
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            job = self.server.automation.get_job(job_id)
+            if job["status"] not in {"queued", "running", "cancelling"}:
+                return job
+            threading.Event().wait(0.01)
+        self.fail("Comparison did not finish in time")
+
+    def test_comparison_collects_only_missing_product_and_preserves_partial_outcome(self):
+        a, b = "B0TEST0001", "B0TEST0002"
+        self.seed_workspace([self.review()])
+        calls = []
+        def collect(urls, db, auth, **options):
+            calls.append((urls, options))
+            self.seed_workspace([self.review(asin=b, review_id="SECOND", product_url=f"https://www.amazon.in/dp/{b}")])
+            return {"status": "partial", "products": [{"asin": b, "status": "paused", "inserted": 1, "pages_processed": 1}], "inserted": 1, "pages_processed": 1}
+        self.server.automation._collection_runner = collect
+        job = self.wait_comparison({"products": [a, b], "collect_missing": True, "max_pages": 3})
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertEqual(calls[0][0], [f"https://www.amazon.in/dp/{b}"])
+        self.assertEqual(calls[0][1]["max_pages"], 3)
+        self.assertEqual(job["result"]["collection"]["status"], "partial")
+        self.assertEqual(job["result"]["usage"]["calls"], 0)
+        self.assertEqual([item["stored_reviews"] for item in job["result"]["products"]], [1, 1])
+        self.assertGreaterEqual(job["result"]["timings"]["total_seconds"], job["result"]["timings"]["collection_seconds"])
+        repeat = self.wait_comparison({"products": [a, b], "collect_missing": True})
+        self.assertEqual(repeat["result"]["collection_mode"], "saved_reviews")
+        self.assertEqual(repeat["result"]["timings"]["collection_seconds"], 0)
+        self.assertEqual(len(calls), 1)
+
+    def test_comparison_blocked_collection_preserves_evidence_and_makes_no_ai_request(self):
+        self.server.automation._collection_runner = lambda *args, **kwargs: {"status": "blocked", "products": [], "detail": "Synthetic sign-in required."}
+        job = self.wait_comparison({"products": ["B0TEST0001", "B0TEST0002"], "collect_missing": True, "allow_external": True})
+        self.assertEqual(job["status"], "blocked", job)
+        self.assertEqual(job["result"]["usage"]["calls"], 0)
+        self.assertEqual(job["result"]["method"], "local_evidence")
+
+    def test_comparison_http_uses_one_fake_request_then_cache_and_rejects_unsafe_links(self):
+        from test_product_comparison import completion
+        sent = []
+        registry = ProviderRegistry(environ={}, transport=lambda payload: sent.append(payload) or completion(payload))
+        registry.configure({"api_key": "SYNTHETIC-COMPARISON-KEY"})
+        self.server.automation._provider_registry = registry
+        a, b = "B0TEST0001", "B0TEST0002"
+        self.seed_workspace([self.review(), self.review(asin=b, review_id="SECOND", product_url=f"https://www.amazon.in/dp/{b}")])
+        for expected in (1, 0):
+            job = self.wait_comparison({"products": [a, b], "allow_external": True})
+            self.assertEqual(job["result"]["method"], "openrouter", job)
+            self.assertEqual(job["result"]["usage"]["calls"], expected)
+        self.assertEqual(len(sent), 1)
+        for products in [[a, a], [a, "https://amazon.in.evil.test/dp/" + b], [a, "https://amzn.in/short"]]:
+            status, _, content = self.post_json("/api/jobs", {"kind": "comparison", "products": products})
+            self.assertEqual(status, 400, content)
+
     def test_http_provider_errors_do_not_echo_messages_or_unsafe_retry_values(self):
         failure = ProviderError("RAW-REQUEST-SECRET", code="rate_limit", retry_after=12.2)
         with patch.object(self.server.automation, "analysis_plan", side_effect=failure):

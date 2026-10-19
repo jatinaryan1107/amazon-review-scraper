@@ -11,6 +11,7 @@ import math
 from pathlib import Path
 import sqlite3
 import threading
+import time
 import uuid
 
 from dashboard_data import DashboardData, REVIEW_COLUMNS
@@ -298,7 +299,7 @@ class AutomationService:
                 active = self._decode(connection.execute(
                     "SELECT * FROM jobs WHERE status IN ('queued','running','cancelling') LIMIT 1"
                 ).fetchone())
-            if active and (active["kind"] in {"research", "brief"} or active["options"].get("analysis_method") == "openrouter"):
+            if active and (active["kind"] in {"research", "brief", "comparison"} or active["options"].get("analysis_method") == "openrouter"):
                 raise JobConflict("Stop the active AI job before changing its provider settings.")
             try:
                 self._registry().configure(payload)
@@ -377,6 +378,7 @@ class AutomationService:
             "analysis": {"kind", "dataset", "asin", "analysis_method", "allow_external", "depth"},
             "research": {"kind", "dataset", "asin", "question", "allow_external", "research_mode"},
             "brief": {"kind", "dataset", "products", "priorities", "allow_external"},
+            "comparison": {"kind", "dataset", "products", "allow_external", "collect_missing", "max_pages"},
             "auth": {"kind"},
         }
         if not isinstance(kind, str) or kind not in allowed or set(payload) - allowed[kind]:
@@ -392,6 +394,11 @@ class AutomationService:
         if kind == "brief":
             from buying_brief import validate_options
             options = validate_options(payload.get("dataset", "workspace"), payload.get("products"), payload.get("priorities", []))
+            return kind, {**options, "allow_external": external}
+        if kind == "comparison":
+            from product_comparison import validate_options
+            options = validate_options(payload.get("dataset", "workspace"), payload.get("products"),
+                payload.get("collect_missing", False), payload.get("max_pages", 3))
             return kind, {**options, "allow_external": external}
         if kind == "research":
             from llm_analysis import can_answer_locally
@@ -603,6 +610,48 @@ class AutomationService:
         self._update(job_id, status="succeeded", phase="finished", result=result,
             detail="Your buying brief is ready. Check the owner evidence behind each finding." if result["method"] == "openrouter" else "Owner evidence is ready. AI interpretation is not included.")
 
+    def _comparison(self, job_id, options):
+        from collection_runtime import run_collection
+        from product_comparison import compare_products
+        started = time.monotonic()
+        dataset = options["dataset"]
+        collection, collection_seconds = None, 0.0
+        missing = [url for asin, url in zip(options["asins"], options["urls"]) if not self._rows(dataset, asin)]
+        if missing and options["collect_missing"]:
+            self._update(job_id, phase="collecting", detail="Collecting missing review samples for this comparison.")
+            collection_started = time.monotonic()
+            runner = self._collection_runner or run_collection
+            collection = runner(missing, self.data.path("workspace"), self.auth_file,
+                max_pages=options["max_pages"], resume=True, transport="browser", cancelled=self._cancel.is_set,
+                on_progress=lambda event: self._update(job_id, phase="collecting", detail=event.get("detail") or "Saving reviews for comparison.",
+                    progress={key: event[key] for key in ("asin", "pages_processed", "inserted", "status") if key in event}))
+            collection_seconds = time.monotonic() - collection_started
+        if self._cancel.is_set() or self._shutdown.is_set():
+            self._update(job_id, status="cancelled", phase="finished", result={"collection": collection,
+                "timings": {"collection_seconds": round(collection_seconds, 3), "total_seconds": round(time.monotonic() - started, 3)}},
+                detail="Comparison stopped. Collected pages remain saved.")
+            return
+        names = {item["asin"]: item.get("name", "") for item in self.data.overview(dataset)["products"]}
+        rows = [row for asin in options["asins"] for row in self._rows(dataset, asin)]
+        self._update(job_id, phase="researching", detail="Preparing separate owner evidence for each product.")
+        result = compare_products(self._engine(), rows, dataset=dataset, products=options["asins"], names=names,
+            allow_external=options["allow_external"], cancelled=self._cancel.is_set,
+            on_progress=lambda event: self._update(job_id, phase="analysing", detail="Comparing owner experiences in one free AI request.", progress=event))
+        result["collection"] = collection
+        result["timings"].update(collection_seconds=round(collection_seconds, 3), total_seconds=round(time.monotonic() - started, 3))
+        result["collection_mode"] = "collected_missing" if collection else "saved_reviews"
+        incomplete = any(not item["selected_reviews"] for item in result["products"])
+        status = "blocked" if incomplete and collection and collection.get("status") == "blocked" else "succeeded"
+        if self._cancel.is_set() or self._shutdown.is_set():
+            status = "cancelled"
+        if len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 131072:
+            raise ValueError("The comparison exceeded its saved result limit.")
+        self._update(job_id, status=status, phase="finished", result=result,
+            detail="Comparison stopped." if status == "cancelled" else
+                "Collection needs attention. No AI comparison was made for missing evidence." if incomplete else
+                "Local owner evidence is ready. The AI response was not accepted; inspect its notice before retrying." if result.get("notice") else
+                "Your comparison is ready. Inspect the quotes and measured timings.")
+
     def _research(self, job_id, options):
         self._update(job_id, phase="researching", detail="Inspecting saved review evidence.")
         answer = self._engine().ask(self._rows(options["dataset"], options["asin"]), options["question"],
@@ -668,6 +717,9 @@ class AutomationService:
             return
         if kind == "brief":
             self._brief(job_id, options)
+            return
+        if kind == "comparison":
+            self._comparison(job_id, options)
             return
         if kind == "research":
             self._research(job_id, options)
@@ -736,7 +788,7 @@ class AutomationService:
                 try:
                     self._run(job)
                 except Exception as exc:
-                    provider_job = job["kind"] in {"research", "brief"} or (job["kind"] == "analysis" and job["options"].get("analysis_method") in {"openai", "openrouter"})
+                    provider_job = job["kind"] in {"research", "brief", "comparison"} or (job["kind"] == "analysis" and job["options"].get("analysis_method") in {"openai", "openrouter"})
                     if provider_job:
                         detail, result = provider_failure(exc)
                         if job["options"].get("analysis_method") == "openai" and not isinstance(exc, ProviderError):

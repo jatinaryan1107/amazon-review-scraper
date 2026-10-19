@@ -4051,6 +4051,20 @@ textarea:focus-visible{
 .buying-mode [data-view="reviews"], .buying-mode [data-view="collection"], .buying-mode [data-view="analysis"], .buying-mode [data-view="research"] { display: none; }
 .buying-mode .page-heading h1 { max-width: 680px; font-size: clamp(27px, 3.4vw, 40px); line-height: 1.2; letter-spacing: -1.2px; }
 .buying-mode .page-subtitle { max-width: 650px; line-height: 1.7; }
+.compare-inputs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.compare-inputs input { width: 100%; min-width: 0; }
+.compare-page-limit { max-width: 330px; margin: 20px 0; }
+.compare-timings { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 24px 0 16px; }
+.compare-timings > div { padding: 14px; border-radius: 10px; background: var(--surface-soft); }
+.compare-timings span, .compare-timings strong { display: block; }
+.compare-timings strong { font-size: 22px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+.compare-collection { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 20px; }
+.brief-summary { padding: 26px; margin-bottom: 22px; }
+.brief-summary h2 { font-size: 24px; line-height: 1.4; margin: 12px 0; }
+#view-compare .brief-product > h3 { font-size: 20px; line-height: 1.5; margin-bottom: 8px; overflow-wrap: anywhere; }
+#view-compare .brief-comparison-table th:first-child { width: 26%; }
+#view-compare .brief-comparison-table thead th:not(:first-child) { width: 37%; }
+@media (max-width: 1000px) { .compare-inputs { grid-template-columns: 1fr; gap: 0; } .compare-timings { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .buying-composer { padding: 30px; }
 .buying-saved-shortcut { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 15px 20px; border: 1px solid var(--line); border-radius: 10px; background: var(--accent-soft); margin-bottom: 18px; font-size: 12px; }
 .buying-intro { margin-bottom: 24px; max-width: 650px; }

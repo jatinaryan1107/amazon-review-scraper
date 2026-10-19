@@ -42,7 +42,7 @@ The CSV export contains review fields; database-only metadata and collection che
 
 Open the dashboard at `http://127.0.0.1:8765/#buying`. This is the default entry screen when no view is specified. The existing dashboard, analysis and collection tools remain available under **Research workspace**.
 
-1. Paste an HTTPS Amazon India product link or a ten-character ASIN, or choose a saved product. Add a second product to compare. Short links must be expanded to their full product URL by the user; the app does not follow arbitrary redirects.
+1. Paste an HTTPS Amazon India product link or a ten-character ASIN, or choose a saved product. **Compare another product** opens the separate category-neutral comparison module. Short links must be expanded to their full product URL by the user; the app does not follow arbitrary redirects.
 2. Optionally choose up to three priorities: clear calls, comfort, sound, battery life or durability. These priorities are designed for audio products. Leaving them blank requests a general brief.
 3. Build the brief from saved reviews. Without AI sharing, the result contains local owner evidence and exact stored rating statistics. Optional AI interpretation produces source-linked benefits, concerns and uncertainty notes.
 
@@ -53,6 +53,17 @@ A brief selects at most 12 relevant reviews per product, balancing available rat
 One optional free-model request covers either one or two products. Matching cached interpretations are revalidated against current source passages and reused without another request. Source data, product order, priorities and privacy preferences participate in cache identity. Unknown product or passage labels, altered quotes, unsupported comparison sources and invalid output fail local validation. Equivalent single-field text notes can be normalized without another model request. A disclosed English keyword check omits off-topic findings; it does not prove semantic relevance or sentiment. Provider and validation failures leave labelled local evidence available, with no automatic retry or paid fallback.
 
 The saved OpenRouter privacy settings apply. Model input uses opaque product, source and passage labels with selected review text and ratings. Reviewer fields, original review IDs and Amazon session data are omitted; review text itself may contain personal information. Sharing requires the explicit checkbox. A missing product prompts collection or CSV import rather than fabricating a brief. Collection remains a separate action that may require manual Amazon sign-in. This local release still requires a configured provider key for AI and is not a hosted consumer service.
+
+## Compare any two products
+
+Open **Compare products** at `http://127.0.0.1:8765/#compare`. This workflow is separate from the priority-based buying brief, collection controls, full analysis and question research.
+
+1. Paste one full Amazon India link in each field, or choose two saved ASINs. Only HTTPS `amazon.in` and `www.amazon.in` product routes are accepted. Links are canonicalized without tracking parameters; duplicate ASINs, other hosts, credentials, ports, pasted prose and short links are rejected before collection.
+2. Choose whether to collect missing samples, with a limit of 1, 3 or 10 pages per new product. Existing samples are reused. Collection uses the saved Amazon session and durable page checkpoints. Sign-in or access blocks require attention; they are not bypassed. Demo comparisons never collect live reviews.
+3. Optionally allow one free OpenRouter request covering both products. Local preparation selects up to 12 excerpts per product across available rating groups. Names, selected text, ratings and opaque source labels are sent; reviewer names, original IDs and session data stay out of the request. Saved privacy settings still apply, and review text itself can contain personal information.
+4. Inspect exact saved rating statistics, product-specific benefits and concerns, missing information and the original source quotes. The AI chooses aspects from the evidence without fixed audio categories. Unrelated products receive separate findings rather than a forced winner. Product relationship and interpretation remain AI judgments, not verified specifications.
+
+The result records collection, preparation, AI plus validation and total job seconds, excluding queue time. Saved-data runs explicitly show zero collection time. Collection outcomes and any partial sample remain visible. A cache hit revalidates the saved interpretation with zero new model calls. Invalid output falls back to labelled local evidence without automatic retries or paid routing. This focused workflow does not need a planner or tool-using agent; deeper investigation remains a separate research mode.
 
 ## Reviewdesk interface
 

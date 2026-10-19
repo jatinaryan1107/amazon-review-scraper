@@ -3,7 +3,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const svgNS = "http://www.w3.org/2000/svg";
-  const validViews = new Set(["buying", "overview", "reviews", "products", "collection", "analysis", "research"]);
+  const validViews = new Set(["buying", "compare", "overview", "reviews", "products", "collection", "analysis", "research"]);
   function preference(key) {
     try { return localStorage.getItem(key); } catch { return null; }
   }
@@ -22,9 +22,11 @@
     providerChecking: false, providerQuota: null, providerQuotaError: false,
     plan: null, planVersion: 0, planController: null, planLoading: false, planError: null,
     researchRenderKey: "", researchJobKey: "",
+    compareJobId: null, compareDirty: false, compareHydrated: false, compareRenderKey: "", compareAwaitingResult: false,
     briefJobId: null, briefDirty: false, briefHydrated: false, briefRenderKey: "", briefAwaitingResult: false,
   };
   const viewCopy = {
+    compare: ["Two products. A clearer decision.", "Compare owner experiences across any category, with the evidence and timing in view."],
     buying: ["Before you buy, know the tradeoffs.", "A clearer view of owner experiences, shaped around what matters to you."],
     overview: ["Review overview", "Explore feedback, compare products, and keep the evidence close."],
     reviews: ["Every review, in focus.", "Find the feedback you need. Open any review to see the full story."],
@@ -153,20 +155,20 @@
     if (!validViews.has(view)) view = "buying";
     const changed = state.view !== view;
     state.view = view;
-    document.querySelectorAll(".view").forEach((section) => { section.hidden = section.id !== `view-${view}` || (!state.overview && !["buying", "collection", "analysis", "research"].includes(view)); });
-    $("page-error").hidden = !state.overviewError || ["buying", "collection", "analysis", "research"].includes(view);
-    $("loading-panel").hidden = Boolean(state.overview) || ["buying", "collection", "analysis", "research"].includes(view) || Boolean(state.overviewError);
-    if (["buying", "collection", "analysis", "research"].includes(view)) $("main-content").setAttribute("aria-busy", "false");
-    document.body.classList.toggle("buying-mode", view === "buying");
-    document.querySelector('[data-view="overview"] span').textContent = view === "buying" ? "Research workspace" : "Overview";
-    document.querySelector(".heading-actions").hidden = view === "buying";
-    $("page-eyebrow").textContent = view === "buying" ? "BEFORE YOU BUY" : "YOUR RESEARCH WORKSPACE";
+    document.querySelectorAll(".view").forEach((section) => { section.hidden = section.id !== `view-${view}` || (!state.overview && !["buying", "compare", "collection", "analysis", "research"].includes(view)); });
+    $("page-error").hidden = !state.overviewError || ["buying", "compare", "collection", "analysis", "research"].includes(view);
+    $("loading-panel").hidden = Boolean(state.overview) || ["buying", "compare", "collection", "analysis", "research"].includes(view) || Boolean(state.overviewError);
+    if (["buying", "compare", "collection", "analysis", "research"].includes(view)) $("main-content").setAttribute("aria-busy", "false");
+    document.body.classList.toggle("buying-mode", ["buying", "compare"].includes(view));
+    document.querySelector('[data-view="overview"] span').textContent = ["buying", "compare"].includes(view) ? "Research workspace" : "Overview";
+    document.querySelector(".heading-actions").hidden = ["buying", "compare"].includes(view);
+    $("page-eyebrow").textContent = ["buying", "compare"].includes(view) ? "BEFORE YOU BUY" : "YOUR RESEARCH WORKSPACE";
     document.querySelectorAll("[data-view]").forEach((link) => {
       const active = link.dataset.view === view;
       link.classList.toggle("active", active);
       if (active) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
     });
-    const pageLabel = view === "buying" ? "Buying brief" : view === "research" ? "Ask reviews" : view.charAt(0).toUpperCase() + view.slice(1);
+    const pageLabel = view === "buying" ? "Buying brief" : view === "compare" ? "Compare products" : view === "research" ? "Ask reviews" : view.charAt(0).toUpperCase() + view.slice(1);
     $("breadcrumb-page").textContent = pageLabel;
     $("page-title").textContent = viewCopy[view][0];
     $("page-subtitle").textContent = viewCopy[view][1];
@@ -178,6 +180,7 @@
     if (view === "collection" && changed) loadAutomation();
     if (view === "research" && changed) { renderResearch(); loadAutomation(); }
     if (view === "buying") renderBuying();
+    if (view === "compare") renderComparison();
     if (changed || (view === "buying" && focus)) window.scrollTo({ top: 0, left: 0, behavior: "auto" });
     if (focus) $("main-content").focus({ preventScroll: true });
   }
@@ -270,7 +273,7 @@
     if (!data.products.some((p) => p.asin === state.filters.asin)) state.filters.asin = "";
     syncFilters();
     syncAnalysisProducts();
-    syncBuyingProducts(); renderBuying();
+    syncBuyingProducts(); renderBuying(); renderComparison();
   }
   function renderStats(summary) {
     const specs = [
@@ -578,7 +581,7 @@
   }
   const activeStatuses = new Set(["queued", "running", "cancelling"]);
   const retryStatuses = new Set(["paused", "blocked", "failed", "cancelled", "interrupted"]);
-  const jobLabels = { collection: "Review collection", analysis: "Review analysis", auth: "Manual sign-in", research: "Review research", brief: "Buying brief" };
+  const jobLabels = { collection: "Review collection", analysis: "Review analysis", auth: "Manual sign-in", research: "Review research", brief: "Buying brief", comparison: "Product comparison" };
   function messageAt(id, message) {
     $(id).textContent = message || "";
     $(id).hidden = !message;
@@ -606,6 +609,7 @@
   }
   function updateWorkflowControls() {
     updateBuyingControls();
+    updateComparisonControls();
     const data = state.automation, active = data?.active_job;
     const busy = Boolean(active && activeStatuses.has(active.status));
     const browserReady = Boolean(data?.capabilities?.playwright_installed);
@@ -643,7 +647,7 @@
     $("research-help").textContent = local ? "This exact statistics question runs locally. No model call or API key is needed." : "Matching passages are found locally first. Without sharing, you get local evidence only. Optional focused AI uses at most one call; agent investigation uses up to four. If AI is unavailable, local sources stay available.";
     $("research-provider-note").hidden = routerReady;
     $("research-provider-note").firstElementChild.textContent = router.disabled ? "AI is disabled after a cost signal. Local statistics and evidence search still work." : "Local evidence search works without a key. Add OpenRouter for optional AI interpretation.";
-    const providerBusy = busy && (["research", "brief"].includes(active.kind) || active.options?.analysis_method === "openrouter");
+    const providerBusy = busy && (["research", "brief", "comparison"].includes(active.kind) || active.options?.analysis_method === "openrouter");
     $("provider-save").disabled = state.providerSaving || state.providerChecking || providerBusy;
     $("provider-key").disabled = state.providerSaving || state.providerChecking || providerBusy || state.provider?.key_source === "environment";
     $("provider-zdr").disabled = state.providerSaving || state.providerChecking || providerBusy;
@@ -687,7 +691,7 @@
       for (const [label, value] of values) { const item = node("div"); item.append(node("dd", "", value), node("dt", "", label)); metrics.append(item); }
       card.append(metrics);
     }
-    if (["analysis", "research", "brief"].includes(job.kind) || job.phase === "analysing") {
+    if (["analysis", "research", "brief", "comparison"].includes(job.kind) || job.phase === "analysing") {
       const values = [];
       if (progress.chunks_done != null && progress.chunks_total != null) values.push(["Text chunks processed", `${number(progress.chunks_done)} / ${number(progress.chunks_total)}`]);
       if (progress.calls != null) values.push(["Model calls", `${number(progress.calls)}${progress.max_calls != null ? ` / ${number(progress.max_calls)}` : ""}`]);
@@ -734,6 +738,11 @@
       state.briefJobId = job.id; state.briefDirty = false; state.briefHydrated = true;
       fillBuyingForm(job.options); navigate("buying", true); renderBuying();
     }, "arrow"));
+    if (!isActive && job.kind === "comparison") actions.append(jobAction("Open comparison", job, () => {
+      if (state.dataset !== job.options.dataset) chooseDataset(job.options.dataset);
+      state.compareJobId = job.id; state.compareDirty = false; state.compareHydrated = true; state.compareRenderKey = "";
+      fillComparisonForm(job.options); navigate("compare", true);
+    }, "arrow"));
     if (actions.children.length) card.append(actions);
     return card;
   }
@@ -778,6 +787,7 @@
     updateWorkflowControls();
     renderResearch();
     renderBuying();
+    renderComparison();
     renderAllowance();
   }
   function schedulePoll() {
@@ -820,7 +830,7 @@
           toast(`${jobLabels[job.kind] || "Job"}: ${String(job.status).replaceAll("_", " ")}.`);
           refreshData ||= job.kind === "collection";
           refreshAnalysis ||= job.kind === "analysis" || Boolean(job.result?.analysis_id);
-          refreshProvider ||= job.kind === "research" || (job.kind === "brief" && job.result?.usage?.calls > 0) || job.options?.analysis_method === "openrouter";
+          refreshProvider ||= job.kind === "research" || (["brief", "comparison"].includes(job.kind) && job.result?.usage?.calls > 0) || job.options?.analysis_method === "openrouter";
         }
         if (job.kind === "collection" && previous && previous.inserted !== job.progress?.reviews_inserted) refreshData = true;
         state.jobStatuses.set(job.id, { status: job.status, inserted: job.progress?.reviews_inserted });
@@ -1029,6 +1039,9 @@
     clearTimeout(state.searchTimer);
     state.dataset = dataset; $("dataset-select").value = dataset;
     $("product-search").value = "";
+    state.compareJobId = null; state.compareDirty = false; state.compareHydrated = false; state.compareRenderKey = "";
+    state.compareAwaitingResult = false;
+    $("compare-first").value = ""; $("compare-second").value = ""; $("compare-consent").checked = false;
     state.briefJobId = null; state.briefDirty = false; state.briefHydrated = false; state.briefRenderKey = ""; state.briefAwaitingResult = false;
     $("buying-product").value = ""; $("buying-second").value = ""; $("buying-consent").checked = false;
     savePreference("reviewdesk-dataset", dataset); resetFilters();
@@ -1399,6 +1412,135 @@
       container.scrollIntoView({behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start"});
     }
   }
+  function updateComparisonControls() {
+    const active = state.automation?.active_job, busy = Boolean(active && activeStatuses.has(active.status));
+    const owned = busy && active.kind === "comparison" && active.options.dataset === state.dataset;
+    for (const input of $("compare-form").querySelectorAll("input, select")) input.disabled = owned;
+    $("compare-submit").disabled = !state.automation || state.mutation || busy;
+    $("compare-consent").disabled = owned || !routerStatus().configured;
+    $("compare-collect").disabled = owned || state.dataset === "demo";
+    if (state.dataset === "demo") $("compare-collect").checked = false;
+    $("compare-pages").disabled = owned || !$("compare-collect").checked;
+    const policy = state.provider?.require_zdr ? "Zero retention is required." : "Zero retention is off; enabled provider or account logging may retain shared text.";
+    const quota = state.providerQuota, allowance = quota?.quota?.available && Date.now() < Number(quota.resets_at) * 1000 ? ` Last checked: ${number(quota.quota.remaining)} / ${number(quota.quota.limit)} account requests left. Refresh in AI settings.` : " Check remaining requests in AI settings.";
+    const cooldown = state.provider?.retry_at && Date.now() < state.provider.retry_at * 1000 ? ` Free AI paused until ${new Date(state.provider.retry_at * 1000).toLocaleTimeString()}.` : "";
+    $("compare-ai-status").textContent = routerStatus().configured ? `At most one free AI attempt, with no automatic retry. ${policy}${allowance}${cooldown}` : "Local comparison works without a key. Connect OpenRouter in AI settings for optional interpretation.";
+  }
+  function comparisonChanged() {
+    state.compareDirty = true; state.compareJobId = null; state.compareRenderKey = "";
+    $("compare-consent").checked = false; messageAt("compare-error", ""); renderComparison();
+  }
+  function fillComparisonForm(options) {
+    $("compare-first").value = options.urls?.[0] || options.asins?.[0] || "";
+    $("compare-second").value = options.urls?.[1] || options.asins?.[1] || "";
+    $("compare-collect").checked = Boolean(options.collect_missing);
+    $("compare-pages").value = String(options.max_pages || 3);
+    $("compare-consent").checked = false;
+  }
+  async function submitComparison(event) {
+    event.preventDefault();
+    const job = await createJob({kind: "comparison", dataset: state.dataset,
+      products: [$("compare-first").value.trim(), $("compare-second").value.trim()],
+      collect_missing: $("compare-collect").checked && state.dataset === "workspace",
+      max_pages: Number($("compare-pages").value), allow_external: $("compare-consent").checked && routerStatus().configured}, "compare-error");
+    if (job) {
+      state.compareJobId = job.id; state.compareDirty = false; state.compareHydrated = true; state.compareRenderKey = "";
+      state.compareAwaitingResult = true;
+      fillComparisonForm(job.options); renderComparison();
+    }
+    updateComparisonControls();
+  }
+  function renderComparison() {
+    updateComparisonControls();
+    const jobs = (state.automation?.jobs || []).filter((job) => job.kind === "comparison" && job.options.dataset === state.dataset);
+    const active = state.automation?.active_job;
+    const current = active?.kind === "comparison" && active.options.dataset === state.dataset ? active : null;
+    const job = state.compareJobId ? jobs.find((item) => item.id === state.compareJobId) || (current?.id === state.compareJobId ? current : null) : state.compareDirty ? null : jobs[0];
+    $("compare-saved-shortcut").hidden = !job?.result?.products || activeStatuses.has(job.status);
+    if (!state.compareHydrated && job && !state.compareDirty) { fillComparisonForm(job.options); state.compareHydrated = true; updateComparisonControls(); }
+    $("compare-progress").hidden = !current;
+    const progressKey = JSON.stringify(current);
+    if ($("compare-progress").dataset.key !== progressKey) {
+      $("compare-progress").dataset.key = progressKey;
+      preserveJobFocus($("compare-progress"), () => {
+        $("compare-progress").replaceChildren();
+        if (current) {
+          const stop = jobAction("Stop safely", current, () => mutateJob(current, "cancel"), "close"); stop.disabled = current.status === "cancelling";
+          $("compare-progress").append(node("h3", "", current.phase === "collecting" ? "Collecting missing reviews" : current.phase === "analysing" ? "Comparing owner experiences" : "Preparing your comparison"), node("p", "field-help", current.detail), stop);
+        }
+      });
+    }
+    const key = JSON.stringify([job?.id, job?.updated_at, state.compareDirty, state.overview?.products]);
+    if (state.compareRenderKey === key) return;
+    state.compareRenderKey = key;
+    const container = $("compare-results"); container.replaceChildren(); $("compare-empty").hidden = Boolean(job || current);
+    if (!job || activeStatuses.has(job.status)) return;
+    const result = job.result;
+    if (!result?.products) {
+      container.append(node("p", "research-notice", job.detail || "The comparison could not finish. Saved reviews remain available.")); return;
+    }
+    const ai = result.method === "openrouter", summary = node("section", "panel brief-summary");
+    summary.append(node("span", "badge", ai ? "AI INTERPRETATION + OWNER SOURCES" : "LOCAL OWNER EVIDENCE"), node("h2", "", "Your product comparison"));
+    const relation = {alternatives: "The AI considers these potential alternatives. Check that their variants and intended uses match.", different_uses: "These products serve different purposes. Compare their owner experiences separately; there is no meaningful overall winner.", uncertain: "The evidence does not establish whether these products are direct alternatives."};
+    summary.append(node("p", "field-help", relation[result.relationship] || relation.uncertain));
+    if (result.cache_hit) summary.append(node("p", "field-help", "Reused a source-checked saved interpretation. No new AI request."));
+    if (result.notice) summary.append(node("p", "research-notice", result.notice.message || "AI interpretation was unavailable. Local evidence is shown."));
+    const timings = node("div", "compare-timings");
+    for (const [label, value] of [["Collection", result.timings.collection_seconds], ["Preparation", result.timings.preparation_seconds], [result.cache_hit ? "AI cache lookup" : "AI + validation", result.timings.ai_seconds], ["Total job", result.timings.total_seconds]]) {
+      const cell = node("div"); cell.append(node("span", "field-help", label), node("strong", "", `${Number(value || 0).toFixed(2)}s`)); timings.append(cell);
+    }
+    summary.append(timings, node("p", "field-help", result.collection_mode === "saved_reviews" ? "Used saved review samples. Collection time is zero for this run; these are not fresh-download timings." : "Measured from the start of this job, excluding queue time. Collection includes browser startup and saved-page writes."));
+    if (result.collection) {
+      const collection = node("section", "compare-collection"); collection.append(node("h3", "", "Collection outcome"));
+      for (const product of result.collection.products || []) collection.append(node("p", "field-help", `${productName(product.asin)}: ${product.status}. ${number(product.inserted)} new reviews across ${number(product.pages_processed)} pages.${product.elapsed_seconds != null ? ` ${Number(product.elapsed_seconds).toFixed(2)}s.` : ""} ${product.detail || ""}`));
+      if (result.collection.detail) collection.append(node("p", "research-notice", result.collection.detail));
+      if (result.collection.status !== "completed") collection.append(node("p", "field-help", "This is a bounded or interrupted sample. Any findings below use only reviews that were actually saved."));
+      summary.append(collection);
+    }
+    container.append(summary);
+    const wrap = node("div", "table-scroll panel"), table = node("table", "brief-comparison-table"), header = node("tr");
+    header.append(node("th", "", "Saved evidence"));
+    for (const product of result.products) { const th = node("th"); th.append(node("strong", "", product.name || productName(product.asin)), node("span", "product-id", product.asin)); th.scope = "col"; th.title = product.name || productName(product.asin); header.append(th); }
+    const head = node("thead"); head.append(header); table.append(head);
+    const body = node("tbody");
+    for (const [label, format] of [["Stored reviews", (p) => number(p.stored_reviews)], ["Average of rated reviews", (p) => `${average(p.average_rating)} / 5 (${number(p.rated_reviews)} rated)`], ["1 or 2 star reviews", (p) => number(p.critical_rated_reviews)], ["Selected for context", (p) => number(p.selected_reviews)]]) {
+      const row = node("tr"), title = node("th", "", label); title.scope = "row"; row.append(title);
+      for (const product of result.products) row.append(node("td", "", format(product))); body.append(row);
+    }
+    table.append(body); wrap.append(table); container.append(wrap);
+    const grid = node("div", "brief-product-grid");
+    for (const product of result.products) {
+      const panel = node("article", "panel brief-product"); panel.append(node("h3", "", product.name || productName(product.asin)), node("p", "product-id", `ASIN ${product.asin}`));
+      const count = state.overview?.products.find((item) => item.asin === product.asin)?.review_count;
+      if (count != null && count !== product.stored_reviews) panel.append(node("p", "research-notice", "The saved sample has changed. Run again to compare the current evidence."));
+      if (!product.selected_reviews) {
+        panel.append(node("p", "research-notice", "No usable owner text is saved for this product. No AI request is made for an incomplete pair."), button("Open collection and sign-in", "text-button", () => { $("collection-urls").value = `https://www.amazon.in/dp/${product.asin}`; navigate("collection", true); }, "layers"));
+      } else if (ai) {
+        for (const [field, title] of [["benefits", "What owners appreciate"], ["concerns", "What deserves attention"]]) {
+          const section = node("section", "brief-section"); section.append(node("h4", "", title));
+          for (const finding of product[field] || []) {
+            const card = node("div", "brief-finding"), source = node("details", "brief-source-details");
+            card.append(node("strong", "brief-priority", finding.aspect), node("p", "", finding.text));
+            source.append(node("summary", "", "Check owner evidence"), briefSources(finding.evidence, result.dataset)); card.append(source); section.append(card);
+          }
+          if (!product[field]?.length) section.append(node("p", "field-help", "No supported finding returned. This does not establish that none exists."));
+          panel.append(section);
+        }
+        const unknowns = node("section", "brief-section"); unknowns.append(node("h4", "", "What remains uncertain"));
+        for (const note of [...(product.uncertainties || []), "Prices, specifications and authenticity were not independently verified. Owner reports can conflict; inspect the original text for counterevidence."]) unknowns.append(node("p", "field-help", note)); panel.append(unknowns);
+      } else {
+        const sources = node("details", "brief-source-details");
+        sources.append(node("summary", "", `Read ${number(product.source_examples?.length || 0)} selected owner reports`), briefSources(product.source_examples || [], result.dataset)); panel.append(sources);
+      }
+      if (product.stored_reviews) panel.append(button("Explore saved reviews", "text-button", () => exploreProduct(product.asin), "arrow")); grid.append(panel);
+    }
+    container.append(grid);
+    const limits = node("section", "panel brief-limits"), list = node("ul"); limits.append(node("h3", "", "How to read this comparison"));
+    for (const limitation of result.limitations) list.append(node("li", "", limitation)); limits.append(list, usageSummary(result.usage, result.model)); container.append(limits);
+    if (state.compareAwaitingResult && state.view === "compare") {
+      state.compareAwaitingResult = false; container.scrollIntoView({behavior: "auto", block: "start"});
+    }
+  }
   function renderResearch() {
     const active = state.automation?.active_job;
     const researchJob = active?.kind === "research" ? active : null;
@@ -1590,13 +1732,17 @@
   });
   $("dataset-select").value = state.dataset;
   $("buying-form").addEventListener("submit", submitBuying);
+  $("compare-form").addEventListener("submit", submitComparison);
+  $("compare-jump").addEventListener("click", () => $("compare-results").scrollIntoView({behavior: "auto", block: "start"}));
+  for (const id of ["compare-first", "compare-second"]) $(id).addEventListener("input", comparisonChanged);
+  for (const id of ["compare-collect", "compare-pages"]) $(id).addEventListener("change", comparisonChanged);
   $("buying-jump").addEventListener("click", () => $("buying-results").scrollIntoView({behavior: "auto", block: "start"}));
   for (const id of ["buying-product", "buying-second"]) $(id).addEventListener("input", buyingChanged);
   for (const input of document.querySelectorAll('[name="buying-priority"]')) input.addEventListener("change", () => {
     if (buyingPriorities().length > 3) { input.checked = false; toast("Choose up to three priorities for a focused brief."); }
     buyingChanged();
   });
-  $("buying-compare").addEventListener("click", () => { setBuyingCompare($("buying-second-wrap").hidden); buyingChanged(); if (!$("buying-second-wrap").hidden) $("buying-second").focus(); });
+  $("buying-compare").addEventListener("click", () => { $("compare-first").value = $("buying-product").value; $("compare-second").value = $("buying-second").value; comparisonChanged(); navigate("compare", true); $("compare-second").focus(); });
   $("buying-example").addEventListener("click", () => { const product = state.overview?.products[0]; if (product) { setBuyingCompare(false); $("buying-product").value = product.asin; buyingChanged(); $("buying-product").focus(); } });
   $("buying-demo").addEventListener("click", () => { chooseDataset("demo"); fillBuyingForm({asins: ["B0DEMO0001"], priorities: []}); buyingChanged(); navigate("buying", true); });
   $("product-search").addEventListener("input", () => renderProducts(state.overview?.products || []));
