@@ -17,7 +17,7 @@ from dashboard import DashboardHandler, DashboardServer
 from dashboard_data import DashboardData, MAX_IMPORT_BYTES, ReviewQuery, spreadsheet_cell
 from offline import DEMO_CSV
 from review_store import REVIEW_FIELDS, ReviewStore
-from llm_provider import ProviderError, ProviderRegistry
+from llm_provider import MODEL, ProviderError, ProviderRegistry
 
 
 class DashboardTests(unittest.TestCase):
@@ -409,7 +409,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(public["key_source"], "none")
         self.assertFalse(public["configured"])
         self.assertTrue(public["free_only"])
-        self.assertEqual(public["response_mode"], "prompt")
+        self.assertEqual(public["response_mode"], "schema")
         status, _, content = self.post_json("/api/provider", {"api_key": "SYNTHETIC-PRIVATE-KEY", "require_zdr": True})
         self.assertEqual(status, 200, content)
         public = json.loads(content)
@@ -426,7 +426,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.get_json("/api/provider")["response_mode"], "schema")
         capabilities = self.get_json("/api/automation")["capabilities"]
         self.assertTrue(capabilities["openrouter_configured"])
-        self.assertEqual(capabilities["openrouter_model"], "openrouter/free")
+        self.assertEqual(capabilities["openrouter_model"], MODEL)
         self.assertTrue(capabilities["free_only"])
         for filename in ("jobs.sqlite3", "analysis.sqlite3"):
             self.assertNotIn(b"SYNTHETIC-PRIVATE-KEY", (self.data.data_dir / filename).read_bytes())

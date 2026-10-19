@@ -1819,7 +1819,7 @@
       steps.push("A source match proves where a quote came from. It does not prove the interpretation. Read the linked reviews before relying on a conclusion.");
       if (router) {
         const provenance = report.provenance;
-        if (provenance?.response_mode) steps.push(provenance.response_mode === "prompt" ? "Response format: compatible JSON. The format was requested in the prompt and validated locally, without requiring provider-enforced JSON support." : "Response format: provider-enforced JSON, followed by the same local validation.");
+        if (provenance?.response_mode) steps.push(provenance.response_mode === "prompt" ? "Response format: compatible JSON, validated locally. New requests also use JSON object mode and automatic syntax repair." : "Response format: provider-enforced JSON, followed by the same local validation.");
         steps.push(provenance ? `Recorded request policy: free-only routing, training use denied, zero data retention ${provenance.require_zdr === true ? "required" : "not required"}.` : "This older report did not record its privacy settings. Current settings do not establish which settings produced a past report.");
         steps.push("Validated chunks are cached locally. An unchanged run can reuse them. The plan shows calls still needed; report generation usage describes the saved report's original run. Failed requests are not retried automatically.");
       }

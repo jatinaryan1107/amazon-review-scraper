@@ -17,7 +17,8 @@ from review_analysis import AnalysisCancelled, AnalysisError
 
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 QUOTA_ENDPOINT = "https://openrouter.ai/api/v1/key"
-MODEL = "openrouter/free"
+MODEL = "xingchen-agi/xing4.0-29b-a4b:free"
+FALLBACK_MODEL = "openrouter/free"
 MAX_BYTES = 1024 * 1024
 RESPONSE_BUDGET_SECONDS = 120
 RESPONSE_MODES = {"prompt", "schema"}
@@ -172,7 +173,8 @@ def chat_payload(messages, *, schema=None, tools=None, require_tool=False, max_t
             messages[0]["content"] += "\n\n" + instruction
         else:
             messages.insert(0, {"role": "system", "content": instruction})
-    payload = {"model": MODEL, "messages": messages, "stream": False, "max_tokens": max_tokens,
+    payload = {"models": [MODEL, FALLBACK_MODEL], "messages": messages, "stream": False, "max_tokens": max_tokens,
+               "temperature": 0,
                "reasoning": {"enabled": False},
                "provider": {"require_parameters": True, "data_collection": "deny",
                             "max_price": {"prompt": 0, "completion": 0, "request": 0}},
@@ -182,6 +184,10 @@ def chat_payload(messages, *, schema=None, tools=None, require_tool=False, max_t
     if schema is not None and response_mode == "schema":
         payload["response_format"] = {"type": "json_schema", "json_schema": {
             "name": "reviewdesk_result", "strict": True, "schema": schema}}
+    elif schema is not None:
+        payload["response_format"] = {"type": "json_object"}
+    if schema is not None:
+        payload["plugins"].append({"id": "response-healing"})
     if tools is not None:
         payload.update(tools=tools, tool_choice="required" if require_tool else "auto")
     return payload
@@ -195,7 +201,7 @@ class ProviderRegistry:
         self._quota_lock = threading.Lock()
         self._session_key = ""
         self._require_zdr = True
-        self._response_mode = "prompt"
+        self._response_mode = "schema"
         self._disabled = False
         self._lock = threading.RLock()
         self._credential_store = credential_store
@@ -235,7 +241,7 @@ class ProviderRegistry:
     def public(self):
         key, source = self._key()
         return {"provider": "openrouter", "configured": bool(key) and not self._disabled, "key_source": source,
-                "model": MODEL, "free_only": True, "privacy": "deny_training",
+                "model": MODEL, "fallback_model": FALLBACK_MODEL, "free_only": True, "privacy": "deny_training",
                 "daily_limit": 50, "require_zdr": self._require_zdr, "response_mode": self._response_mode,
                 "disabled": self._disabled, "remember_key": self._remember_key,
                 "remember_available": self._credential_store is not None, "storage_error": self._storage_error,

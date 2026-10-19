@@ -321,7 +321,7 @@ class LLMEngine:
         selected = len({lookup[entry["key"]]["review_id"] for chunk in chunks for entry in chunk})
         notes = ["Exact statistics are computed locally. Only review title, body, rating and product identity are sent.",
                  "Free model availability and the account's actual remaining quota may be lower than this local budget."]
-        notes.append("Compatible JSON requests are validated locally without requiring provider JSON support."
+        notes.append("Compatible JSON requests use JSON object mode and response healing, followed by local source validation."
                      if response_mode == "prompt" else "Provider-enforced JSON is required, followed by the same local validation.")
         if depth == "quick":
             notes.append("Quick analysis uses one bounded, balanced sample. It does not read every stored review.")

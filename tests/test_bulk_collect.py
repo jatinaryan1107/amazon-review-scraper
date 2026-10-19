@@ -82,7 +82,8 @@ def plan(*numbers, status="paused", new=1, pages=5, **changes):
 
 class BulkCampaignTests(unittest.TestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory(dir=Path(__file__).parent)
+        # Keep journal timing tests outside cloud-synced workspace folders.
+        folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.folder = Path(folder.name)
         self.clock = Clock()

@@ -16,7 +16,7 @@ import uuid
 
 from dashboard_data import DashboardData, REVIEW_COLUMNS
 from review_parser import extract_asin
-from llm_provider import ProviderError, public_diagnostics
+from llm_provider import MODEL, FALLBACK_MODEL, ProviderError, public_diagnostics
 
 
 ACTIVE = ("queued", "running", "cancelling")
@@ -273,7 +273,7 @@ class AutomationService:
                 "storage_error": public.get("storage_error") is True,
                 "quota_snapshot": public.get("quota_snapshot"),
                 "app_daily_remaining": remaining, "retry_at": retry_at,
-                "model": "openrouter/free", "free_only": True, "privacy": "deny_training",
+                "model": MODEL, "fallback_model": FALLBACK_MODEL, "free_only": True, "privacy": "deny_training",
                 "daily_limit": 50, "require_zdr": public.get("require_zdr") is True,
                 "response_mode": "prompt" if public.get("response_mode") == "prompt" else "schema",
                 "disabled": public.get("disabled") is True}
@@ -555,7 +555,7 @@ class AutomationService:
             raise ValueError("There are no reviews in this scope yet. Collect or import reviews first.")
         fingerprint = report_fingerprint(rows, dataset=dataset, asin=asin)
         settings = self.provider_settings()
-        model = settings.get("model", "") if method == "openai" else "openrouter/free" if method == "openrouter" else ""
+        model = settings.get("model", "") if method == "openai" else MODEL if method == "openrouter" else ""
         cache_method = self._engine().cache_discriminator(depth) if method == "openrouter" else method
         with self._connection() as connection:
             matches = connection.execute(

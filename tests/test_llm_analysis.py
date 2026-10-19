@@ -47,11 +47,12 @@ class EngineTests(unittest.TestCase):
         return LLMEngine(self.registry, self.store, transport=transport)
 
     def test_response_mode_changes_request_contract_cache_and_recorded_provenance(self):
+        self.registry.configure({"response_mode": "prompt"})
         captured = []
         rows = [review()]
         engine = self.engine(lambda payload: captured.append(payload) or report_response(payload))
         prompt = engine.analyse(rows, dataset="workspace", asin="", depth="deep")
-        self.assertNotIn("response_format", captured[0])
+        self.assertEqual(captured[0]["response_format"], {"type": "json_object"})
         self.assertEqual(prompt["provenance"]["response_mode"], "prompt")
         self.assertEqual(engine.plan(rows, depth="deep")["chunks_cached"], 1)
         self.registry.configure({"response_mode": "schema"})
@@ -445,6 +446,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(engine.plan([review()])["chunks_cached"], 0)
 
     def test_agent_uses_read_only_tool_then_validates_only_exposed_evidence(self):
+        self.registry.configure({"response_mode": "prompt"})
         calls = []
         def agent(payload):
             calls.append(payload)
@@ -459,7 +461,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result["usage"]["calls"], 2)
         self.assertEqual(calls[0]["tool_choice"], "required")
         self.assertNotIn("response_format", calls[0])
-        self.assertNotIn("response_format", calls[1])
+        self.assertEqual(calls[1]["response_format"], {"type": "json_object"})
         self.assertIn('"answer"', calls[1]["messages"][0]["content"])
         self.assertEqual(result["evidence"][0]["quote"], "The battery lasts all evening.")
         self.assertEqual([step["name"] for step in result["steps"] if step["kind"] == "tool"], ["search_reviews"])
