@@ -192,6 +192,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         try:
             parsed = urlsplit(self.path)
+            if not parsed.scheme and not parsed.netloc and parsed.path == "/api/comparison/preview":
+                if parsed.query:
+                    raise ValueError("Comparison previews do not accept query filters.")
+                accepted, payload = self.read_action_json()
+                if accepted:
+                    if not isinstance(payload, dict):
+                        raise ValueError("Supply comparison options as a JSON object.")
+                    self.json_response(200, self.server.automation.comparison_preview(payload))
+                return
             if not parsed.scheme and not parsed.netloc and parsed.path == "/api/products/name":
                 if parsed.query:
                     raise ValueError("Product names do not accept query filters.")

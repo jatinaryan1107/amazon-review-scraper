@@ -7,8 +7,8 @@ import unittest
 
 from analysis_store import AnalysisStore
 from llm_analysis import LLMEngine
-from llm_provider import ProviderRegistry
-from product_comparison import compare_products, validate_options
+from llm_provider import ProviderError, ProviderRegistry
+from product_comparison import collection_plan, compare_products, comparison_json, validate_options
 from review_analysis import AnalysisCancelled
 
 
@@ -135,3 +135,111 @@ class ProductComparisonTests(unittest.TestCase):
             self.assertEqual(item["selected_reviews"], 12)
             self.assertEqual(item["stored_reviews"], 30)
             self.assertEqual({example["rating"] for example in item["source_examples"]}, {"1", "3", "5"})
+
+    def test_target_plan_reuses_full_samples_and_bounds_only_the_shortfall(self):
+        options = validate_options("workspace", [A, B], True, 3, 30)
+        plan = collection_plan(options, {A: {"review_count": 30}, B: {"review_count": 19}})
+        self.assertEqual(plan, [{"asin": B, "url": f"https://www.amazon.in/dp/{B}", "pages": 2, "before": 19}])
+        self.assertEqual(collection_plan({**options, "collect_missing": False}, {}), [])
+        self.assertEqual(collection_plan(options, {A: {"review_count": 10, "collection_complete": True}, B: {"review_count": 30}}), [])
+        self.assertEqual(collection_plan({**options, "target_reviews": 100, "max_pages": 1}, {})[0]["pages"], 1)
+        for target, focus in [(True, ""), (31, ""), (30, "x" * 301), (30, "bad\x00focus"), (30, None)]:
+            with self.assertRaises(ValueError):
+                validate_options("workspace", [A, B], target_reviews=target, focus=focus)
+
+    def test_priorities_change_selection_and_cache_identity_without_cross_product_sources(self):
+        sent = []
+        engine = self.engine(lambda payload: sent.append(payload) or completion(payload))
+        rows = [review(A, review_body="The bottle is easy to clean."), review(B, review_body="Chopper is easy to clean."),
+                review(A, 2, review_body="The finish is shiny."), review(B, 2, review_body="The box arrived yesterday.")]
+        result = self.compare(engine, rows, allow_external=True, focus="clean")
+        self.assertEqual(result["method"], "openrouter")
+        self.assertTrue(all(item["focus_matched_reviews"] == 1 for item in result["products"]))
+        self.assertEqual(len(result["source_context"]), 2)
+        self.assertTrue(all("clean" in item["body"] for item in result["source_context"]))
+        incoming = json.loads(sent[0]["messages"][-1]["content"])
+        self.assertEqual(incoming["decision_focus"], "clean")
+        repeated = self.compare(engine, rows, allow_external=True, focus="clean")
+        self.assertEqual(repeated["usage"]["calls"], 0)
+        other = self.compare(engine, rows, allow_external=True, focus="shiny")
+        self.assertEqual(other["usage"]["calls"], 1)
+        self.assertEqual(other["products"][1]["focus_matched_reviews"], 0)
+        self.assertTrue(any("no lexical matches" in note for note in other["limitations"]))
+
+    def test_unmatched_focus_returns_general_context_and_explicit_limits(self):
+        result = self.compare(self.engine(), focus="dishwasher")
+        self.assertTrue(all(item["selected_reviews"] for item in result["products"]))
+        self.assertTrue(all(item["focus_matched_reviews"] == 0 for item in result["products"]))
+        for context in result["source_context"]:
+            self.assertIn(context["body"], review(context["asin"])["review_body"])
+            self.assertNotIn("reviewer_name", context)
+
+    def test_bounded_delimiter_normalization_does_not_change_fields_or_quoted_brackets(self):
+        raw = {"relationship": "different_uses", "products": [{"text": "A quoted ] bracket and an escaped \" quote"}, {"text": "Two"}]}
+        valid = json.dumps(raw)
+        for content in (valid[:-2] + "}", valid + "]}"):
+            value, normalized = comparison_json(content)
+            self.assertEqual(value, raw)
+            self.assertTrue(normalized)
+        self.assertEqual(comparison_json(valid), (raw, False))
+
+    def test_normalization_rejects_truncation_duplicate_keys_prose_and_large_repairs(self):
+        for content in ['{"products":[', '{"text":"unfinished}', '{"x":1,"x":2}]}',
+                        '{"x":1} {"y":2}', 'Here is {"x":1}', ']{"x":1}', '{"x":1}]]]', '{"x":1']:
+            with self.subTest(content=content), self.assertRaises(ProviderError):
+                comparison_json(content)
+
+    def test_missing_array_delimiter_is_normalized_once_and_cached_after_source_checks(self):
+        sent = []
+        def missing_delimiter(payload):
+            sent.append(payload)
+            response = completion(payload)
+            raw = response["choices"][0]["message"]["content"]
+            self.assertTrue(raw.endswith("]}"))
+            response["choices"][0]["message"]["content"] = raw[:-2] + "}"
+            return response
+        engine = self.engine(missing_delimiter)
+        for expected in (1, 0):
+            result = self.compare(engine, allow_external=True, focus="clean")
+            self.assertEqual(result["method"], "openrouter")
+            self.assertTrue(result["format_normalized"])
+            self.assertEqual(result["usage"]["calls"], expected)
+        self.assertEqual(len(sent), 1)
+
+    def test_flat_output_contract_keeps_correct_product_sources_and_revalidates_cache(self):
+        sent = []
+        def flat(payload):
+            sent.append(payload)
+            response = completion(payload)
+            nested = json.loads(response["choices"][0]["message"]["content"])
+            raw = {"relationship": nested["relationship"]}
+            for item in nested["products"]:
+                key = item["product"]
+                for field, plural in (("benefit", "benefits"), ("concern", "concerns")):
+                    finding = (item[plural] or [{}])[0]
+                    raw[f"{key}_{field}"] = finding.get("text", "")
+                    raw[f"{key}_{field}_aspect"] = finding.get("aspect", "")
+                    raw[f"{key}_{field}_sources"] = finding.get("evidence", [])
+                raw[f"{key}_unknowns"] = "Current price is unknown."
+            response["choices"][0]["message"]["content"] = json.dumps(raw)
+            return response
+        engine = self.engine(flat)
+        for expected in (1, 0):
+            result = self.compare(engine, allow_external=True)
+            self.assertEqual(result["method"], "openrouter")
+            self.assertEqual(result["usage"]["calls"], expected)
+            self.assertEqual(result["products"][0]["benefits"][0]["evidence"][0]["asin"], A)
+        self.assertEqual(len(sent), 1)
+
+    def test_flat_findings_cannot_leave_sources_on_empty_claims(self):
+        from product_comparison import _validate
+        raw = {"relationship": "different_uses"}
+        for product in ("p1", "p2"):
+            for field in ("benefit", "concern"):
+                raw[f"{product}_{field}"] = ""
+                raw[f"{product}_{field}_aspect"] = ""
+                raw[f"{product}_{field}_sources"] = []
+            raw[f"{product}_unknowns"] = ""
+        raw["p1_benefit_sources"] = ["e1"]
+        with self.assertRaises(ProviderError):
+            _validate(self.engine(), raw, {"p1": A, "p2": B}, {}, {})

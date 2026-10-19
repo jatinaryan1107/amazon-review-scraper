@@ -378,7 +378,7 @@ class AutomationService:
             "analysis": {"kind", "dataset", "asin", "analysis_method", "allow_external", "depth"},
             "research": {"kind", "dataset", "asin", "question", "allow_external", "research_mode"},
             "brief": {"kind", "dataset", "products", "priorities", "allow_external"},
-            "comparison": {"kind", "dataset", "products", "allow_external", "collect_missing", "max_pages"},
+            "comparison": {"kind", "dataset", "products", "allow_external", "collect_missing", "max_pages", "target_reviews", "focus"},
             "auth": {"kind"},
         }
         if not isinstance(kind, str) or kind not in allowed or set(payload) - allowed[kind]:
@@ -398,7 +398,7 @@ class AutomationService:
         if kind == "comparison":
             from product_comparison import validate_options
             options = validate_options(payload.get("dataset", "workspace"), payload.get("products"),
-                payload.get("collect_missing", False), payload.get("max_pages", 3))
+                payload.get("collect_missing", False), payload.get("max_pages", 3), payload.get("target_reviews", 0), payload.get("focus", ""))
             return kind, {**options, "allow_external": external}
         if kind == "research":
             from llm_analysis import can_answer_locally
@@ -610,21 +610,62 @@ class AutomationService:
         self._update(job_id, status="succeeded", phase="finished", result=result,
             detail="Your buying brief is ready. Check the owner evidence behind each finding." if result["method"] == "openrouter" else "Owner evidence is ready. AI interpretation is not included.")
 
+    def comparison_preview(self, payload):
+        from collection_runtime import session_status
+        from product_comparison import collection_plan
+        kind, options = self._validate({**payload, "kind": "comparison"})
+        overview = self.data.overview(options["dataset"])
+        saved = {item["asin"]: item for item in overview["products"]}
+        ended = {item["asin"] for item in overview["checkpoints"] if item["status"] in {"complete", "zero_reviews"}}
+        for asin in ended:
+            saved.setdefault(asin, {})["collection_complete"] = True
+        planned = collection_plan(options, saved)
+        session = (self._session_reader or session_status)(self.auth_file)
+        products = []
+        for asin, url in zip(options["asins"], options["urls"]):
+            info = saved.get(asin, {})
+            step = next((step for step in planned if step["asin"] == asin), None)
+            products.append({"asin": asin, "url": url, "name": info.get("name", ""), "stored_reviews": info.get("review_count", 0),
+                "last_added_at": info.get("last_review_added_at"), "planned_pages": step["pages"] if step else 0, "available_pages_ended": asin in ended})
+        return {"products": products, "target_reviews": options["target_reviews"], "new_pages_maximum": sum(step["pages"] for step in planned),
+            "needs_session": bool(planned) and not session.get("valid", False), "collection_planned": bool(planned),
+            "session_saved": bool(session.get("valid")), "ai_configured": self.provider_metadata()["configured"],
+            "model_calls": 0, "detail": "This checks local saved data only. No Amazon or AI request was made."}
+
     def _comparison(self, job_id, options):
         from collection_runtime import run_collection
-        from product_comparison import compare_products
+        from product_comparison import compare_products, collection_plan
         started = time.monotonic()
         dataset = options["dataset"]
         collection, collection_seconds = None, 0.0
-        missing = [url for asin, url in zip(options["asins"], options["urls"]) if not self._rows(dataset, asin)]
-        if missing and options["collect_missing"]:
-            self._update(job_id, phase="collecting", detail="Collecting missing review samples for this comparison.")
+        overview = self.data.overview(dataset)
+        saved = {item["asin"]: item for item in overview["products"]}
+        for item in overview["checkpoints"]:
+            if item["status"] in {"complete", "zero_reviews"}:
+                saved.setdefault(item["asin"], {})["collection_complete"] = True
+        planned = collection_plan(options, saved)
+        if planned:
+            self._update(job_id, phase="collecting", detail="Gathering reviews toward your sample target.")
             collection_started = time.monotonic()
             runner = self._collection_runner or run_collection
-            collection = runner(missing, self.data.path("workspace"), self.auth_file,
-                max_pages=options["max_pages"], resume=True, transport="browser", cancelled=self._cancel.is_set,
-                on_progress=lambda event: self._update(job_id, phase="collecting", detail=event.get("detail") or "Saving reviews for comparison.",
-                    progress={key: event[key] for key in ("asin", "pages_processed", "inserted", "status") if key in event}))
+            collection = {"status": "completed", "products": [], "inserted": 0, "pages_processed": 0, "detail": ""}
+            # Group equal page budgets to retain one browser session when possible.
+            budgets = list(dict.fromkeys(step["pages"] for step in planned))
+            for pages in budgets:
+                if self._cancel.is_set() or self._shutdown.is_set():
+                    break
+                batch = runner([step["url"] for step in planned if step["pages"] == pages], self.data.path("workspace"), self.auth_file,
+                    max_pages=pages, resume=True, transport="browser", cancelled=self._cancel.is_set,
+                    on_progress=lambda event: self._update(job_id, phase="collecting", detail=event.get("detail") or "Saving reviews for comparison.",
+                        progress={key: event[key] for key in ("asin", "pages_processed", "inserted", "status") if key in event}))
+                collection["products"].extend(batch.get("products", []))
+                for field in ("inserted", "pages_processed"):
+                    collection[field] += batch.get(field, 0)
+                if batch.get("status") != "completed":
+                    collection["status"] = batch.get("status", "failed")
+                    collection["detail"] = batch.get("detail", "")
+                if batch.get("status") in {"blocked", "failed"} or batch.get("cancelled"):
+                    break
             collection_seconds = time.monotonic() - collection_started
         if self._cancel.is_set() or self._shutdown.is_set():
             self._update(job_id, status="cancelled", phase="finished", result={"collection": collection,
@@ -635,11 +676,17 @@ class AutomationService:
         rows = [row for asin in options["asins"] for row in self._rows(dataset, asin)]
         self._update(job_id, phase="researching", detail="Preparing separate owner evidence for each product.")
         result = compare_products(self._engine(), rows, dataset=dataset, products=options["asins"], names=names,
-            allow_external=options["allow_external"], cancelled=self._cancel.is_set,
+            allow_external=options["allow_external"], focus=options.get("focus", ""), cancelled=self._cancel.is_set,
             on_progress=lambda event: self._update(job_id, phase="analysing", detail="Comparing owner experiences in one free AI request.", progress=event))
         result["collection"] = collection
         result["timings"].update(collection_seconds=round(collection_seconds, 3), total_seconds=round(time.monotonic() - started, 3))
         result["collection_mode"] = "collected_missing" if collection else "saved_reviews"
+        target = options.get("target_reviews", 0)
+        result["coverage"] = {"target_reviews": target, "target_met": all(item["stored_reviews"] >= target for item in result["products"]),
+            "needs_more": [item["asin"] for item in result["products"] if target and item["stored_reviews"] < target]}
+        ended = {item["asin"] for item in self.data.overview(dataset)["checkpoints"] if item["status"] in {"complete", "zero_reviews"}}
+        if ended.intersection(options["asins"]):
+            result["coverage"]["available_pages_ended"] = sorted(ended.intersection(options["asins"]))
         incomplete = any(not item["selected_reviews"] for item in result["products"])
         status = "blocked" if incomplete and collection and collection.get("status") == "blocked" else "succeeded"
         if self._cancel.is_set() or self._shutdown.is_set():

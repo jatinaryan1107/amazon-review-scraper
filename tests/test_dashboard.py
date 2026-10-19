@@ -670,6 +670,50 @@ class DashboardTests(unittest.TestCase):
             status, _, content = self.post_json("/api/jobs", {"kind": "comparison", "products": products})
             self.assertEqual(status, 400, content)
 
+    def test_comparison_preview_is_local_guarded_and_does_not_create_a_job(self):
+        a, b = "B0TEST0001", "B0TEST0002"
+        self.seed_workspace([self.review()])
+        before = len(self.get_json("/api/automation")["jobs"])
+        with patch.object(self.server.automation, "_engine", side_effect=AssertionError("A preview must not construct an AI engine")):
+            status, _, content = self.post_json("/api/comparison/preview", {"products": [a, b], "collect_missing": True, "target_reviews": 30})
+        self.assertEqual(status, 200, content)
+        result = json.loads(content)
+        self.assertEqual(result["model_calls"], 0)
+        self.assertTrue(result["needs_session"])
+        self.assertEqual([item["stored_reviews"] for item in result["products"]], [1, 0])
+        self.assertEqual(result["new_pages_maximum"], 6)
+        self.assertEqual(len(self.get_json("/api/automation")["jobs"]), before)
+        status, _, _ = self.request("/api/comparison/preview", method="POST", body=b'{}', headers={"Content-Type": "application/json"})
+        self.assertEqual(status, 403)
+        status, _, _ = self.post_json("/api/comparison/preview?bad=1", {"products": [a, b]})
+        self.assertEqual(status, 400)
+
+    def test_comparison_top_up_uses_remaining_page_budget_and_exposes_unmet_target(self):
+        a, b = "B0TEST0001", "B0TEST0002"
+        self.seed_workspace([self.review(review_id=f"A-{index}") for index in range(30)] +
+                            [self.review(asin=b, product_url=f"https://www.amazon.in/dp/{b}", review_id=f"B-{index}") for index in range(10)])
+        calls = []
+        def collect(urls, db, auth, **options):
+            calls.append((urls, options["max_pages"], options["resume"]))
+            self.seed_workspace([self.review(asin=b, product_url=f"https://www.amazon.in/dp/{b}", review_id=f"NEW-{index}") for index in range(10)])
+            return {"status": "paused", "products": [{"asin": b, "status": "paused", "inserted": 10, "pages_processed": 1}], "inserted": 10, "pages_processed": 1}
+        self.server.automation._collection_runner = collect
+        job = self.wait_comparison({"products": [a, b], "target_reviews": 30, "max_pages": 1, "collect_missing": True})
+        self.assertEqual(calls, [([f"https://www.amazon.in/dp/{b}"], 1, True)])
+        self.assertEqual(job["result"]["coverage"], {"target_reviews": 30, "target_met": False, "needs_more": [b]})
+        self.assertEqual(job["result"]["usage"]["calls"], 0)
+        self.assertEqual([item["stored_reviews"] for item in job["result"]["products"]], [30, 20])
+
+    def test_comparison_cancellation_after_collection_preserves_pages_and_skips_ai(self):
+        def collect(*args, **kwargs):
+            self.server.automation._cancel.set()
+            return {"status": "paused", "cancelled": True, "products": [], "inserted": 0, "pages_processed": 0}
+        self.server.automation._collection_runner = collect
+        job = self.wait_comparison({"products": ["B0TEST0001", "B0TEST0002"], "collect_missing": True, "allow_external": True})
+        self.assertEqual(job["status"], "cancelled")
+        self.assertIsNotNone(job["result"]["collection"])
+        self.assertNotIn("usage", job["result"])
+
     def test_http_provider_errors_do_not_echo_messages_or_unsafe_retry_values(self):
         failure = ProviderError("RAW-REQUEST-SECRET", code="rate_limit", retry_after=12.2)
         with patch.object(self.server.automation, "analysis_plan", side_effect=failure):

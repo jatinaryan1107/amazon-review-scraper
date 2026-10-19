@@ -4061,6 +4061,23 @@ textarea:focus-visible{
 .compare-collection { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 20px; }
 .brief-summary { padding: 26px; margin-bottom: 22px; }
 .brief-summary h2 { font-size: 24px; line-height: 1.4; margin: 12px 0; }
+.compare-preview { padding: 20px; margin: 20px 0 26px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 12px; }
+.compare-preview h3 { font-size: 14px; margin-bottom: 15px; }
+.compare-preview-product { border-bottom: 1px solid var(--line); padding: 12px 0; }
+.compare-preview-product strong { display: block; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.compare-preview > p { margin-top: 14px; }
+.compare-focus-options, .compare-form-actions { display: flex; flex-wrap: wrap; gap: 12px 20px; margin: 8px 0 20px; }
+.compare-sampling { margin: 20px 0; }
+.compare-sampling > .form-field { max-width: 330px; }
+.compare-advanced > summary { cursor: pointer; color: var(--accent); font-size: 12px; padding: 10px 0; }
+.compare-coverage { margin: 20px 0; padding: 16px; background: var(--surface-soft); border-radius: 10px; }
+.compare-coverage > strong { font-size: 13px; }
+.compare-coverage > p { margin: 8px 0; }
+.compare-focus-note { padding: 12px 0; font-size: 13px; line-height: 1.7; color: var(--accent); }
+.compare-decision { padding: 26px; margin-bottom: 22px; }
+.compare-decision h3 { font-size: 20px; margin-bottom: 12px; }
+.comparison-headline { font-size: 13px; line-height: 1.85; margin-top: 10px; overflow-wrap: anywhere; }
+.compare-timing-details > summary { padding: 8px 0; }
 #view-compare .brief-product > h3 { font-size: 20px; line-height: 1.5; margin-bottom: 8px; overflow-wrap: anywhere; }
 #view-compare .brief-comparison-table th:first-child { width: 26%; }
 #view-compare .brief-comparison-table thead th:not(:first-child) { width: 37%; }
