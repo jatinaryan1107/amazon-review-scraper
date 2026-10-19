@@ -1,0 +1,301 @@
+{
+  "corpus_version": 1,
+  "corpus_sha256": "21c56ac29fc4b180cc7120efc1cf8178a35218491e625ed39980575c7c725895",
+  "data": "fictional",
+  "model_calls": 0,
+  "mode": "offline_contracts_and_retrieval",
+  "cases": 24,
+  "passed": 22,
+  "results": [
+    {
+      "id": "stats_mixed_ratings",
+      "kind": "statistics",
+      "passed": true,
+      "expected": {
+        "total_reviews": 3,
+        "rated_reviews": 2,
+        "average_rating": 4.0
+      },
+      "actual": {
+        "total_reviews": 3,
+        "rated_reviews": 2,
+        "average_rating": 4.0
+      }
+    },
+    {
+      "id": "stats_duplicate_identity",
+      "kind": "statistics",
+      "passed": true,
+      "expected": {
+        "total_reviews": 1,
+        "rated_reviews": 1,
+        "average_rating": 4.0
+      },
+      "actual": {
+        "total_reviews": 1,
+        "rated_reviews": 1,
+        "average_rating": 4.0
+      }
+    },
+    {
+      "id": "stats_shared_product_identity",
+      "kind": "statistics",
+      "passed": true,
+      "expected": {
+        "total_reviews": 1,
+        "rated_reviews": 1,
+        "average_rating": 4.0
+      },
+      "actual": {
+        "total_reviews": 1,
+        "rated_reviews": 1,
+        "average_rating": 4.0
+      }
+    },
+    {
+      "id": "stats_conflicting_ratings",
+      "kind": "statistics",
+      "passed": true,
+      "expected": {
+        "total_reviews": 1,
+        "rated_reviews": 0,
+        "average_rating": null
+      },
+      "actual": {
+        "total_reviews": 1,
+        "rated_reviews": 0,
+        "average_rating": null
+      }
+    },
+    {
+      "id": "battery_synonym",
+      "kind": "retrieval",
+      "passed": true,
+      "precision": 1.0,
+      "recall": 1.0,
+      "expected": [
+        "a"
+      ],
+      "actual": [
+        "a"
+      ]
+    },
+    {
+      "id": "mixed_battery_experiences",
+      "kind": "retrieval",
+      "passed": true,
+      "precision": 1.0,
+      "recall": 1.0,
+      "expected": [
+        "a",
+        "b"
+      ],
+      "actual": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "id": "negated_defect",
+      "kind": "retrieval",
+      "passed": true,
+      "precision": 1.0,
+      "recall": 1.0,
+      "expected": [
+        "a",
+        "b"
+      ],
+      "actual": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "id": "value_not_construction",
+      "kind": "retrieval",
+      "passed": true,
+      "precision": 1.0,
+      "recall": 1.0,
+      "expected": [
+        "a",
+        "b"
+      ],
+      "actual": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "id": "current_price_unknown",
+      "kind": "retrieval",
+      "passed": true,
+      "precision": 1.0,
+      "recall": 1.0,
+      "expected": [
+        "a"
+      ],
+      "actual": [
+        "a"
+      ]
+    },
+    {
+      "id": "missing_waterproof_evidence",
+      "kind": "retrieval",
+      "passed": true,
+      "precision": 1.0,
+      "recall": 1.0,
+      "expected": [],
+      "actual": []
+    },
+    {
+      "id": "cleaning_tradeoff",
+      "kind": "retrieval",
+      "passed": true,
+      "precision": 1.0,
+      "recall": 1.0,
+      "expected": [
+        "a",
+        "b"
+      ],
+      "actual": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "id": "variant_separation",
+      "kind": "retrieval",
+      "passed": false,
+      "precision": 0.5,
+      "recall": 1.0,
+      "expected": [
+        "a"
+      ],
+      "actual": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "id": "untrusted_review_text",
+      "kind": "retrieval",
+      "passed": true,
+      "precision": 1.0,
+      "recall": 1.0,
+      "expected": [
+        "a",
+        "b"
+      ],
+      "actual": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "id": "hindi_battery",
+      "kind": "retrieval",
+      "passed": true,
+      "precision": 1.0,
+      "recall": 1.0,
+      "expected": [
+        "a"
+      ],
+      "actual": [
+        "a"
+      ]
+    },
+    {
+      "id": "contradictory_comfort",
+      "kind": "retrieval",
+      "passed": true,
+      "precision": 1.0,
+      "recall": 1.0,
+      "expected": [
+        "a",
+        "b"
+      ],
+      "actual": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "id": "substring_boundary",
+      "kind": "retrieval",
+      "passed": false,
+      "precision": 0.0,
+      "recall": 0.0,
+      "expected": [
+        "a"
+      ],
+      "actual": []
+    },
+    {
+      "id": "source_valid",
+      "kind": "source_validation",
+      "passed": true,
+      "expected_accept": true,
+      "actual_accept": true
+    },
+    {
+      "id": "source_unknown_source",
+      "kind": "source_validation",
+      "passed": true,
+      "expected_accept": false,
+      "actual_accept": false
+    },
+    {
+      "id": "source_altered_quote",
+      "kind": "source_validation",
+      "passed": true,
+      "expected_accept": false,
+      "actual_accept": false
+    },
+    {
+      "id": "source_repeated_source",
+      "kind": "source_validation",
+      "passed": true,
+      "expected_accept": false,
+      "actual_accept": false
+    },
+    {
+      "id": "source_empty_evidence",
+      "kind": "source_validation",
+      "passed": true,
+      "expected_accept": false,
+      "actual_accept": false
+    },
+    {
+      "id": "source_long_answer",
+      "kind": "source_validation",
+      "passed": true,
+      "expected_accept": false,
+      "actual_accept": false
+    },
+    {
+      "id": "source_extra_field",
+      "kind": "source_validation",
+      "passed": true,
+      "expected_accept": false,
+      "actual_accept": false
+    },
+    {
+      "id": "source_duplicate_json",
+      "kind": "source_validation",
+      "passed": true,
+      "expected_accept": false,
+      "actual_accept": false
+    }
+  ],
+  "model_answer_evaluation": {
+    "status": "not_run",
+    "results": [],
+    "semantic_accuracy": "not_measured",
+    "human_review_required": true
+  },
+  "limitations": [
+    "Retrieval is lexical and can select text with the opposite meaning. Source matching cannot establish semantic support.",
+    "These are authored synthetic scenarios, not independent customer data or a general accuracy benchmark.",
+    "Reference notes and review rubrics need independent human review. No LLM judge or live model is used by this command."
+  ]
+}
