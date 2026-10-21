@@ -22,6 +22,11 @@ STATIC_FILES = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/ui/dom.js": ("ui/dom.js", "text/javascript; charset=utf-8"),
+    "/ui/execution.js": ("ui/execution.js", "text/javascript; charset=utf-8"),
+    "/ui/showcase.js": ("ui/showcase.js", "text/javascript; charset=utf-8"),
+    "/ui/inspection.js": ("ui/inspection.js", "text/javascript; charset=utf-8"),
+    "/ui/comparison.js": ("ui/comparison.js", "text/javascript; charset=utf-8"),
 }
 SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
@@ -37,10 +42,11 @@ class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], data: DashboardData, *, automation=None, auth_file=None):
+    def __init__(self, address: tuple[str, int], data: DashboardData, *, automation=None, auth_file=None, showcase=None):
         if address[0] != "127.0.0.1":
             raise ValueError("The dashboard can bind only to 127.0.0.1.")
         self.data = data
+        self.showcase = showcase or {"enabled": False}
         super().__init__(address, DashboardHandler)
         try:
             self.automation = automation or AutomationService(data, auth_file or ROOT / "auth.json")
@@ -112,6 +118,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path in STATIC_FILES:
                 filename, content_type = STATIC_FILES[path]
                 self.respond(200, (ROOT / "web" / filename).read_bytes(), content_type)
+                return
+            if path == "/api/showcase":
+                if parsed.query:
+                    raise ValueError("Showcase information does not accept filters.")
+                self.json_response(200, self.server.showcase)
                 return
             if path == "/api/automation":
                 if parsed.query:

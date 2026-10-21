@@ -18,9 +18,9 @@ from review_store import REVIEW_FIELDS, ReviewStore, product_name
 MAX_IMPORT_BYTES = 5 * 1024 * 1024
 MAX_IMPORT_ROWS = 10_000
 DEMO_NAMES = {
-    "B0DEMO0001": "Desk fan 01",
-    "B0DEMO0002": "Desk fan 02",
-    "B0DEMO0003": "Desk fan 03",
+    "B0DEMO0001": "North Desk Fan",
+    "B0DEMO0002": "Field Desk Fan",
+    "B0DEMO0003": "Harbor Desk Fan",
 }
 DATASETS = {
     "demo": {"id": "demo", "name": "Demo workspace", "is_demo": True,

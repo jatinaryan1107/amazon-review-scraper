@@ -11,8 +11,11 @@ from review_analysis import AnalysisCancelled
 from review_parser import extract_asin
 
 
-VERSION = 3
+VERSION = 4
 PRIORITIES = {
+    "usability": "easy simple controls use setup",
+    "cleaning": "clean cleaning wash maintenance",
+    "value": "value price cost worth money",
     "calls": "microphone voice calls",
     "comfort": "comfort fit ears",
     "sound": "sound audio bass",
@@ -20,6 +23,9 @@ PRIORITIES = {
     "durability": "durability build broken warranty",
 }
 PRIORITY_TERMS = {
+    "usability": set("easy easier easiest simple simplicity controls control buttons button labels setup setting settings use using usable usability instructions confusing difficult difficulty awkward".split()),
+    "cleaning": set("clean cleaning cleaned wash washed washable washing dirt dirty maintenance maintain rinse rinsing".split()),
+    "value": set("value price cost worth money cheap cheaper affordable expensive budget overpriced".split()),
     "calls": set("microphone mic mics call calls voice voices speech conversation conversations speaking speakerphone meeting meetings zoom teams".split()),
     "comfort": set("comfort comfortable uncomfortable discomfort fit fits fitting ear ears earcup earcups earpads pads cushion cushioning pressure headband weight heavy lightweight light sweat sweating hot heat tight loose hurt hurts pain painful wear wearing".split()),
     "sound": set("sound audio bass treble music listening clarity clear volume vocals noise isolation cancellation anc distortion equalizer eq".split()),
@@ -47,7 +53,7 @@ def validate_options(dataset, products, priorities):
     if (not isinstance(priorities, list) or len(priorities) > 3
             or any(not isinstance(item, str) or item not in PRIORITIES for item in priorities)
             or len(set(priorities)) != len(priorities)):
-        raise ValueError("Choose up to three priorities from calls, comfort, sound, battery and durability.")
+        raise ValueError("Choose up to three supported priorities.")
     return {"dataset": dataset, "asins": asins, "priorities": sorted(priorities)}
 
 

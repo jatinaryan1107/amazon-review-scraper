@@ -76,6 +76,26 @@ class ResearchTests(unittest.TestCase):
         self.ask(engine)
         self.assertEqual(len(sent), 3)
 
+    def test_duplicate_passage_labels_are_recovered_locally_then_cached(self):
+        sent = []
+        def repeated(payload):
+            sent.append(payload)
+            response = completion(payload)
+            value = json.loads(response["choices"][0]["message"]["content"])
+            value["evidence"] *= 2
+            response["choices"][0]["message"]["content"] = json.dumps(value)
+            return response
+        engine = self.engine(repeated)
+        result = self.ask(engine)
+        self.assertEqual(result["method"], "openrouter")
+        self.assertEqual(result["usage"]["calls"], 1)
+        self.assertEqual(len(result["evidence"]), 1)
+        self.assertTrue(any(step["name"] == "duplicate_citations" for step in result["steps"]))
+        again = self.ask(engine)
+        self.assertTrue(again["cache_hit"])
+        self.assertEqual(again["usage"]["calls"], 0)
+        self.assertEqual(len(sent), 1)
+
     def test_altered_cached_quote_cannot_be_displayed_as_valid_ai_evidence(self):
         engine = self.engine()
         self.ask(engine)

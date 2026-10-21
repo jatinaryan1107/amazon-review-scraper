@@ -1,3 +1,5 @@
+> Deferred: current work focuses on the local portfolio project. This document records possible future hosting work, not the current release scope.
+
 # A public beta built around review research
 
 The goal is a hosted workspace people can use without installing Python. Review research is its first complete feature. Keep collection and analysis as separate services so other data sources can be added later.

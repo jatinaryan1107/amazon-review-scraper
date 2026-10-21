@@ -19,3 +19,11 @@ reports/
 *.log
 legacy/
 UPSTREAM.md
+
+evaluation-report.json
+my-answers.json
+checked-answers.json
+browser-artifacts/
+
+data/showcase/
+data/evaluations/

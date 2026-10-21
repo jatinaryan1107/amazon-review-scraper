@@ -105,7 +105,7 @@ class DashboardTests(unittest.TestCase):
         self.assertAlmostEqual(actual["summary"]["verified_share"], verified * 100 / 15)
         self.assertEqual(actual["summary"]["low_rating_count"], sum(float(row["rating"]) <= 2 for row in rows))
         self.assertEqual(sum(bucket["count"] for bucket in actual["ratings"]), 15)
-        self.assertEqual({product["name"] for product in actual["products"]}, {"Desk fan 01", "Desk fan 02", "Desk fan 03"})
+        self.assertEqual({product["name"] for product in actual["products"]}, {"North Desk Fan", "Field Desk Fan", "Harbor Desk Fan"})
         self.assertEqual(len(actual["recent_reviews"]), 5)
         self.assertNotIn(str(self.folder), json.dumps(actual))
         self.assertTrue(actual["last_updated"].endswith("Z"))
