@@ -14,12 +14,12 @@ The command uses no model, network or database. Output includes the corpus versi
 | --- | --- | --- |
 | Local statistics | 4 of 4 | Mixed ratings, duplicate IDs, shared membership and conflicting ratings |
 | Source validation | 8 of 8 | Valid evidence and rejection of unknown, altered, repeated, missing, oversized or malformed output |
-| Retrieval | 10 of 12 | Relevant passages in small authored scenarios |
+| Retrieval | 20 of 20 | Relevant passages in small authored scenarios |
 | Model interpretation | Not measured | Requires actual model answers and human review |
 
 The committed [result file](../docs/evaluation-results.json) contains every outcome.
 
-Two retrieval gaps remain visible. A question about a blue variant also selects the red variant because they share topic words. A question using `overheat` misses a passage using `overheating`. Neither result is fixed by matching a quote after generation. The tiny corpus should not become a list of special cases built just to make a score green.
+The original blue/red variant and overheat/overheating cases now pass. Eight additional retrieval scenarios exercise equivalent capacities, missing identity, conflicting descriptions, required topic evidence, size aliases, usage quantities, negation and ambiguous requests. Separate unit tests probe long excerpts and more boundary cases. Explicit word families cover overheating and leaking without general substring matching. Variant filtering uses a narrow English grammar and review descriptions, not verified purchase metadata. Passing this authored corpus does not establish general retrieval quality or semantic correctness. See [retrieval decisions and limits](../docs/RETRIEVAL.md).
 
 ## Checking model answers
 

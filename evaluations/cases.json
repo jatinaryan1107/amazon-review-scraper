@@ -492,6 +492,203 @@
       ],
       "mutation": "duplicate_json",
       "accept": false
+    },
+    {
+      "id": "capacity_equivalence",
+      "kind": "retrieval",
+      "question": "Does the 500 ml bottle leak?",
+      "reviews": [
+        {
+          "id": "a",
+          "body": "The 0.5 litre bottle leaks at its lid.",
+          "rating": 4
+        },
+        {
+          "id": "b",
+          "body": "The 1 litre bottle leaks.",
+          "rating": 4
+        },
+        {
+          "id": "c",
+          "body": "The bottle leaks.",
+          "rating": 4
+        }
+      ],
+      "relevant_ids": [
+        "a"
+      ],
+      "reference_note": "Equivalent explicit capacities may identify a review; unspecified capacity is excluded.",
+      "human_review_rubric": [
+        "Check identity, context and negation against the original text. Do not infer frequency or universal behavior."
+      ]
+    },
+    {
+      "id": "variant_unknown",
+      "kind": "retrieval",
+      "question": "Does the blue variant overheat?",
+      "reviews": [
+        {
+          "id": "a",
+          "body": "It overheats when charging.",
+          "rating": 4
+        },
+        {
+          "id": "b",
+          "body": "Red variant. No overheating.",
+          "rating": 4
+        }
+      ],
+      "relevant_ids": [],
+      "reference_note": "No account identifies the requested blue variant; do not infer it.",
+      "human_review_rubric": [
+        "Check identity, context and negation against the original text. Do not infer frequency or universal behavior."
+      ]
+    },
+    {
+      "id": "variant_conflicting",
+      "kind": "retrieval",
+      "question": "Does the blue variant overheat?",
+      "reviews": [
+        {
+          "id": "a",
+          "body": "I ordered the blue variant but received red. It overheats.",
+          "rating": 4
+        },
+        {
+          "id": "b",
+          "body": "Blue variant. No overheating in my use.",
+          "rating": 4
+        }
+      ],
+      "relevant_ids": [
+        "b"
+      ],
+      "reference_note": "Mixed color descriptions are ambiguous; a negative heat report is still relevant evidence.",
+      "human_review_rubric": [
+        "Check identity, context and negation against the original text. Do not infer frequency or universal behavior."
+      ]
+    },
+    {
+      "id": "variant_topic_required",
+      "kind": "retrieval",
+      "question": "Does the blue variant overheat?",
+      "reviews": [
+        {
+          "id": "a",
+          "body": "Blue variant. The stand is sturdy.",
+          "rating": 4
+        },
+        {
+          "id": "b",
+          "body": "Red variant. It overheats.",
+          "rating": 4
+        }
+      ],
+      "relevant_ids": [],
+      "reference_note": "Variant identity alone cannot establish evidence about the requested topic.",
+      "human_review_rubric": [
+        "Check identity, context and negation against the original text. Do not infer frequency or universal behavior."
+      ]
+    },
+    {
+      "id": "size_equivalence",
+      "kind": "retrieval",
+      "question": "Is size XL comfortable?",
+      "reviews": [
+        {
+          "id": "a",
+          "body": "Size: extra large. Comfortable for short use.",
+          "rating": 4
+        },
+        {
+          "id": "b",
+          "body": "Size: medium. Comfortable all day.",
+          "rating": 4
+        },
+        {
+          "id": "c",
+          "body": "A large pocket. Comfortable fabric.",
+          "rating": 4
+        }
+      ],
+      "relevant_ids": [
+        "a"
+      ],
+      "reference_note": "Explicit equivalent size descriptions qualify; object adjectives do not identify size.",
+      "human_review_rubric": [
+        "Check identity, context and negation against the original text. Do not infer frequency or universal behavior."
+      ]
+    },
+    {
+      "id": "usage_quantity_unscoped",
+      "kind": "retrieval",
+      "question": "Can it blend 500 ml of milk?",
+      "reviews": [
+        {
+          "id": "a",
+          "body": "It can blend milk smoothly.",
+          "rating": 4
+        },
+        {
+          "id": "b",
+          "body": "It cannot blend frozen milk.",
+          "rating": 4
+        }
+      ],
+      "relevant_ids": [
+        "a",
+        "b"
+      ],
+      "reference_note": "A usage quantity is not a request to filter by product capacity; conflicting experiences remain visible.",
+      "human_review_rubric": [
+        "Check identity, context and negation against the original text. Do not infer frequency or universal behavior."
+      ]
+    },
+    {
+      "id": "negated_variant_identity",
+      "kind": "retrieval",
+      "question": "Does the blue variant overheat?",
+      "reviews": [
+        {
+          "id": "a",
+          "body": "Not the blue variant. It overheats.",
+          "rating": 4
+        },
+        {
+          "id": "b",
+          "body": "Blue variant. No overheating.",
+          "rating": 4
+        }
+      ],
+      "relevant_ids": [
+        "b"
+      ],
+      "reference_note": "A negated variant description cannot establish identity.",
+      "human_review_rubric": [
+        "Check identity, context and negation against the original text. Do not infer frequency or universal behavior."
+      ]
+    },
+    {
+      "id": "ambiguous_variant_request",
+      "kind": "retrieval",
+      "question": "Does the blue variant or red variant overheat?",
+      "reviews": [
+        {
+          "id": "a",
+          "body": "Blue variant. It overheats.",
+          "rating": 4
+        },
+        {
+          "id": "b",
+          "body": "Red variant. It overheats.",
+          "rating": 4
+        }
+      ],
+      "relevant_ids": [],
+      "reference_note": "Ambiguous multi-variant scope requires clarification rather than silently merging findings.",
+      "human_review_rubric": [
+        "Check identity, context and negation against the original text. Do not infer frequency or universal behavior."
+      ]
     }
   ]
 }

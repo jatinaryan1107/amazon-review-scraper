@@ -14,7 +14,7 @@ The worker thread owns the synchronous Playwright objects and writable collectio
 
 ## Retrieve locally before asking a model
 
-Counts and averages have exact local answers. Lexical and concept matching can select context cheaply and repeatably. This keeps most research to one optional model call and makes cache behavior understandable. It also misses word forms and can mix variant descriptions. The evaluation publishes those shortcomings. Embeddings or another agent should earn their place through measured improvement.
+Counts and averages have exact local answers. Lexical and concept matching can select context cheaply and repeatably. This keeps most research to one optional model call and makes cache behavior understandable. Explicit word families handle selected forms such as overheat and overheating without broad substring matching. Focused questions can require explicit color, capacity or size descriptions; unknown and conflicting identities are excluded and disclosed. This favors precision at the cost of missing relevant reviews. The grammar remains limited, and review text is not verified purchase metadata. [Retrieval notes](RETRIEVAL.md) explain the boundaries. Embeddings or another agent should earn their place through measured improvement.
 
 ## Treat structured output as a boundary
 

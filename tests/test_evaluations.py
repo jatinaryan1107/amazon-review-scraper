@@ -14,7 +14,7 @@ class EvaluationTests(unittest.TestCase):
     def test_offline_report_is_reproducible_and_discloses_unmeasured_semantics(self):
         first = evaluate(self.corpus)
         self.assertEqual(first, evaluate(self.corpus))
-        self.assertEqual(first["cases"], 24)
+        self.assertEqual(first["cases"], 32)
         self.assertEqual(first["model_calls"], 0)
         self.assertEqual(first["model_answer_evaluation"]["status"], "not_run")
         self.assertEqual(first["model_answer_evaluation"]["semantic_accuracy"], "not_measured")
