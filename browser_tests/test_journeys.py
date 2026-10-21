@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from playwright.sync_api import expect, sync_playwright
@@ -45,7 +46,7 @@ class BrowserJourneys(unittest.TestCase):
         self.addCleanup(self.folder.cleanup)
         self.calls, self.errors, self.external = [], [], []
 
-    def app(self, *, showcase=False, failure=False, width=1280):
+    def app(self, *, showcase=False, failure=False, width=1280, research_rows=None):
         folder = Path(self.folder.name) / "workspace"
         if showcase:
             data = prepare(folder)
@@ -65,6 +66,13 @@ class BrowserJourneys(unittest.TestCase):
                 return {"status": "paused", "cancelled": cancelled(), "products": [], "pages_processed": 0, "inserted": 0}
             service = AutomationService(data, folder / "unused.json", provider_registry=registry, collection_runner=collect,
                 settings=lambda: {"configured": False}, session_reader=lambda path: {"valid": True, "exists": True})
+        self.addCleanup(service.close)
+        if research_rows:
+            names = patch.dict("dashboard_data.DEMO_NAMES", {"B0TEST0001": "Fictional Travel Bottle"})
+            names.start()
+            self.addCleanup(names.stop)
+            with ReviewStore(data.path("demo")) as store:
+                store.upsert_reviews(research_rows, product_names={"B0TEST0001": "Fictional Travel Bottle"})
         self.service = service
         server = DashboardServer(("127.0.0.1", 0), data, automation=service, showcase=manifest(data) if showcase else None)
         server.RequestHandlerClass = QuietHandler
@@ -127,6 +135,9 @@ class BrowserJourneys(unittest.TestCase):
         expect(guide).to_contain_text("fictional")
         guide.get_by_role("button", name="1. Inspect a fan", exact=True).click()
         expect(page.locator("#buying-product")).to_have_value("B0DEMO0001")
+        expect(page.locator("#buying-product-preview")).to_contain_text("North Desk Fan")
+        expect(page.locator("#buying-product-preview")).to_contain_text("5 saved reviews")
+        expect(page.get_by_role("button", name="Inspect saved reviews", exact=True)).to_be_enabled()
         page.locator("#buying-submit").click()
         expect(page.locator("#buying-results")).to_contain_text("North Desk Fan")
         guide.get_by_text("Read an example interpretation", exact=True).click()
@@ -140,6 +151,55 @@ class BrowserJourneys(unittest.TestCase):
         expect(page.locator("#compare-second")).to_have_value("B0DEMO0002")
         page.get_by_role("button", name="Compare products", exact=True).click()
         expect(page.get_by_role("heading", name="Your product comparison", exact=True)).to_be_visible()
+        self.assertEqual(self.calls, [])
+
+    def test_inspection_preview_validates_links_and_marks_optional_ai(self):
+        page = self.app()
+        product = page.locator("#buying-product")
+        product.fill("https://www.amazon.in/Fan/dp/B0DEMO0001?tag=fictional")
+        expect(page.locator("#buying-product-preview")).to_contain_text("North Desk Fan")
+        page.locator("#buying-consent").check()
+        expect(page.get_by_role("button", name="Build AI interpretation", exact=True)).to_be_enabled()
+        product.fill("https://amazon.in.evil.invalid/dp/B0DEMO0001")
+        expect(page.locator("#buying-product-preview")).to_contain_text("full HTTPS amazon.in")
+        expect(page.get_by_role("button", name="Inspect saved reviews", exact=True)).to_be_enabled()
+        product.fill("B0TEST0001")
+        expect(page.locator("#buying-product-preview")).to_contain_text("Product not saved in this workspace")
+        self.assertEqual(self.calls, [])
+
+    def test_scoped_research_discloses_variant_exclusions_and_preserves_sources(self):
+        def row(identity, body):
+            return {"asin": "B0TEST0001", "review_id": identity, "review_title": "Fictional account",
+                    "review_body": body, "rating": "4", "product_url": "https://www.amazon.in/dp/B0TEST0001"}
+        page = self.app(showcase=True, width=390, research_rows=[
+            row("BLUE", "Blue variant. No overheating in my use."),
+            row("RED", "Red variant. It overheats."),
+            row("UNKNOWN", "It overheats during charging.")])
+        page.get_by_role("button", name="Open navigation", exact=True).click()
+        page.get_by_role("link", name="Research workspace", exact=True).click()
+        page.get_by_role("button", name="Open navigation", exact=True).click()
+        page.get_by_role("link", name="Ask reviews", exact=True).click()
+        page.locator("#research-product").select_option("B0TEST0001")
+        expect(page.locator("#research-mode")).to_be_disabled()
+        expect(page.locator("#research-mode option:checked")).to_have_text("Focused local search")
+        expect(page.locator("#research-provider-note")).to_be_hidden()
+        page.locator("#research-question").fill("Does the blue variant overheat?")
+        page.locator("#research-submit").click()
+        result = page.locator("#research-results")
+        scope = result.get_by_role("region", name="Evidence selection", exact=True)
+        expect(scope).to_contain_text("Fictional Travel Bottle")
+        expect(scope).to_contain_text("Fictional demo sample")
+        expect(scope).to_contain_text("Color: blue")
+        expect(scope).to_contain_text("1 excluded without a clear variant")
+        expect(scope).to_contain_text("1 excluded for conflicting")
+        expect(result.locator(".evidence-card")).to_have_count(1)
+        expect(result.locator(".evidence-card")).to_contain_text("No overheating")
+        result.get_by_text("Why this review matched the variant", exact=True).click()
+        expect(result.locator(".brief-source-details")).to_contain_text("Blue variant")
+        result.get_by_role("button", name="Read source review", exact=True).click()
+        expect(page.get_by_role("dialog")).to_contain_text("No overheating")
+        page.keyboard.press("Escape")
+        self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 390)
         self.assertEqual(self.calls, [])
 
     def test_comparison_sources_export_and_checked_cache_reuse(self):

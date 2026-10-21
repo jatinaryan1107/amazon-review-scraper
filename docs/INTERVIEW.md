@@ -15,6 +15,7 @@ Reviewdesk collects product reviews into a local workspace and helps inspect the
 - How cancellation, a process restart and a provider rate limit differ.
 - What the sharing checkbox authorizes and where credentials are stored.
 - Why a matching quote does not prove the associated claim.
+- How a real response exposed redundant citations, and why exact duplicate removal is safe while unknown source labels still fail.
 - Which tests use real browser interactions, fake providers and authored examples.
 - Why local storage fits this version and what would change for multiple users.
 
@@ -30,4 +31,4 @@ Use numbers only when you can explain how they were measured. The recorded 100-r
 
 ## Gaps to discuss openly
 
-Public hosting is deferred. The deeper live agent remains provider-limited. The evaluation includes failures for word forms and product variants; it has not measured semantic accuracy on independent reviews. Automated checks and AI assistance do not replace reading the code, reviewing changes and understanding the tradeoffs.
+Public hosting is deferred. The deeper live agent remains provider-limited. Focused retrieval supports a limited English variant grammar and selected word families. Unrecognized language can be missed; review descriptions are not verified variant identity. The evaluation has not measured semantic accuracy on independent reviews. Automated checks and AI assistance do not replace reading the code, reviewing changes and understanding the tradeoffs.

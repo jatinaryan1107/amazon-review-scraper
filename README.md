@@ -24,9 +24,11 @@ For your own workspace, run `python dashboard.py`. Live collection additionally 
 
 - **Inspect a product:** choose priorities, read the saved evidence and open the original reviews.
 - **Compare products:** validate two links, reuse saved reviews and collect only a bounded shortfall when requested.
-- **Ask about reviews:** exact count and rating questions stay local. Other questions retrieve excerpts before optional AI interpretation.
+- **Ask about reviews:** exact count and rating questions stay local. Other questions retrieve excerpts before optional AI interpretation. Explicit variant questions disclose which review descriptions qualified and which were excluded.
 - **Follow a run:** expand its execution history to see recorded stages, timings, request counts and recovery outcomes.
 - **Check a claim:** accepted AI passages resolve to stored source text. A matching quote establishes traceability, not whether the interpretation is correct.
+
+![Saved product preview in the fictional workspace](docs/images/inspection.png)
 
 ## Engineering choices
 
@@ -54,7 +56,7 @@ python -m unittest discover -s browser_tests -v
 
 The browser tests use fictional reviews, fake providers and isolated storage. They block external browser requests. CI exercises the Python suite on Windows and Linux, plus Chromium journeys for inspection, comparisons, sources, export, cache reuse, cancellation, provider failure and keyboard navigation.
 
-The synthetic evaluation currently passes 4 statistics cases, 8 source-validation cases and 10 of 12 retrieval cases. The two retrieval failures are published. These results do not measure LLM interpretation accuracy. A separate opt-in runner can collect real answers for selected fictional cases, with human review left pending. [Evaluation method and results](evaluations/README.md).
+The synthetic evaluation currently passes 4 statistics cases, 8 source-validation cases and 20 of 20 retrieval cases, including explicit variant scope and selected word forms. These are small authored regression cases, not a general retrieval benchmark. These results do not measure LLM interpretation accuracy. A separate opt-in runner can collect real answers for selected fictional cases, with human review left pending. [Evaluation method and results](evaluations/README.md).
 
 ## Limits and project status
 

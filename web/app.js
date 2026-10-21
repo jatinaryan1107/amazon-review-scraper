@@ -593,18 +593,20 @@
     const busy = Boolean(active && activeStatuses.has(active.status));
     const browserReady = Boolean(data?.capabilities?.playwright_installed);
     const sessionReady = data?.auth?.status === "saved";
-    $("auth-start").disabled = !data || state.mutation || busy || !browserReady;
+    $("auth-start").disabled = Boolean(state.showcase) || !data || state.mutation || busy || !browserReady;
     $("auth-start").lastElementChild.textContent = sessionReady ? "Refresh sign-in" : "Open sign-in";
     const canSave = active?.kind === "auth" && active.status === "running" && active.phase === "awaiting_login";
     $("auth-save").hidden = !canSave;
     $("auth-save").disabled = !canSave || state.mutation;
-    $("collection-submit").disabled = !data || state.mutation || busy || !browserReady || !sessionReady;
+    $("collection-submit").disabled = Boolean(state.showcase) || !data || state.mutation || busy || !browserReady || !sessionReady;
     $("collection-submit").lastElementChild.textContent = state.mutation ? "Please wait..." : "Start collection";
     const configured = Boolean(data?.capabilities?.openai_configured), router = routerStatus();
     const routerReady = router.configured;
     $("openai-option").disabled = !configured;
     $("openai-option").textContent = configured ? `OpenAI${data.capabilities.model ? ` (${data.capabilities.model})` : ""}` : "OpenAI, not configured";
     if (!configured && $("analysis-method").value === "openai") $("analysis-method").value = "local";
+    if (state.showcase) $("analysis-method").value = "local";
+    $("analysis-method").disabled = Boolean(state.showcase);
     const method = $("analysis-method").value, external = method !== "local", useRouter = method === "openrouter";
     $("analysis-consent-wrap").hidden = !external;
     $("analysis-depth-wrap").hidden = !useRouter;
@@ -622,9 +624,12 @@
     $("research-submit").lastElementChild.textContent = state.mutation ? "Please wait..." : "Ask reviews";
     const local = isLocalQuestion($("research-question").value);
     $("research-consent").disabled = !routerReady || local;
-    $("research-consent-wrap").hidden = local;
-    $("research-help").textContent = local ? "This exact statistics question runs locally. No model call or API key is needed." : "Matching passages are found locally first. Without sharing, you get local evidence only. Optional focused AI uses at most one call; agent investigation uses up to four. If AI is unavailable, local sources stay available.";
-    $("research-provider-note").hidden = routerReady;
+    $("research-consent-wrap").hidden = local || Boolean(state.showcase);
+    $("research-help").textContent = state.showcase ? "This showcase searches fictional reviews locally. External AI is disabled. Selected passages are evidence to inspect, not an AI conclusion." : local ? "This exact statistics question runs locally. No model call or API key is needed." : "Matching passages are found locally first. Without sharing, you get local evidence only. Optional focused AI uses at most one call; agent investigation uses up to four. If AI is unavailable, local sources stay available.";
+    $("research-provider-note").hidden = routerReady || Boolean(state.showcase);
+    $("research-mode").disabled = Boolean(state.showcase);
+    if (state.showcase) $("research-mode").value = "focused";
+    $("research-mode").querySelector('option[value="focused"]').textContent = state.showcase ? "Focused local search" : "Focused answer, up to 1 AI call";
     $("research-provider-note").firstElementChild.textContent = router.disabled ? "AI is disabled after a cost signal. Local statistics and evidence search still work." : "Local evidence search works without a key. Add OpenRouter for optional AI interpretation.";
     const providerBusy = busy && (["research", "brief", "comparison"].includes(active.kind) || active.options?.analysis_method === "openrouter");
     $("provider-save").disabled = state.providerSaving || state.providerChecking || providerBusy;
@@ -1129,6 +1134,31 @@
     if (job) $("research-consent").checked = false;
     updateWorkflowControls(); renderResearch();
   }
+  function researchScope(scope, options) {
+    const section = node("section", "research-evidence-scope");
+    section.setAttribute("aria-label", "Evidence selection");
+    section.append(node("h4", "", "Evidence behind this answer"));
+    const asin = scope.asin || options?.asin || "";
+    section.append(node("strong", "scope-product", asin ? productName(asin) : "All saved products"));
+    if (asin) section.append(node("span", "product-id", `ASIN ${asin}`));
+    section.append(node("p", "field-help", (scope.dataset || options?.dataset) === "demo" ? "Fictional demo sample" : "Saved workspace sample. Coverage of all Amazon reviews is unknown."));
+    const facts = node("dl", "scope-counts");
+    for (const [value, label] of [[scope.total_reviews, "Stored in scope"], [scope.matched_reviews, "Local matches"], [scope.retrieved_reviews, "Selected for context"], [scope.analysed_reviews, "Examined"]]) {
+      if (value == null) continue;
+      const fact = node("div"); fact.append(node("dt", "", label), node("dd", "", number(value))); facts.append(fact);
+    }
+    if (facts.children.length) section.append(facts);
+    if (scope.retrieval_method === "local_keyword_and_concept_search") section.append(node("p", "field-help", scope.general_sample ? "A general sample was selected. These are examples, not a topic count." : "Keyword and concept matches select context. Match counts do not measure how many owners agree or report a problem."));
+    const variant = scope.variant_scope;
+    if (variant) {
+      const details = node("div", "variant-scope");
+      details.append(node("strong", "", "Variant scope from review text"), node("p", "", (variant.constraints || []).join(" · ")));
+      details.append(node("p", "field-help", `${plural(variant.eligible_reviews, "review")} eligible before topic matching. ${number(variant.excluded_unknown)} excluded without a clear variant; ${number(variant.excluded_conflicting)} excluded for conflicting or ambiguous descriptions.`));
+      details.append(node("p", "field-help", variant.ambiguous ? "The requested variant scope could not be resolved. Ask about one explicitly named color, capacity or size." : "Descriptions are not verified product metadata. Unlisted variant attributes are not filtered."));
+      section.append(details);
+    }
+    return section;
+  }
   function researchCard(job) {
     const result = job.result, card = node("article", "panel research-answer");
     card.append(window.ReviewdeskUI.execution(job));
@@ -1162,12 +1192,7 @@
     const usage = usageSummary(result.usage, result.method === "local" ? "" : result.model);
     if (usage.children.length) card.append(usage);
     const scope = result.scope || {};
-    const scopeFacts = [];
-    if (scope.total_reviews != null) scopeFacts.push(`${plural(scope.total_reviews, "stored review")}`);
-    if (scope.matched_reviews != null) scopeFacts.push(`${number(scope.matched_reviews)} local matches`);
-    if (scope.retrieved_reviews != null) scopeFacts.push(`${number(scope.retrieved_reviews)} selected for context`);
-    if (scope.analysed_reviews != null) scopeFacts.push(`${number(scope.analysed_reviews)} examined`);
-    if (scopeFacts.length) card.append(node("p", "research-coverage", scopeFacts.join(" · ")));
+    card.append(researchScope(scope, job.options));
     const sources = Array.isArray(result.evidence) ? result.evidence : [];
     if (sources.length) {
       const evidence = node("div", "research-evidence"), title = node("h4", "", "Source reviews"); evidence.append(title);
@@ -1176,6 +1201,14 @@
         const quotes = Array.isArray(source.quotes) && source.quotes.length ? source.quotes.slice(0, 8) : source.quote ? [source.quote] : [];
         if (quotes.length > 1) entry.append(node("p", "muted", `${number(quotes.length)} passages from one review`));
         for (const quote of quotes) entry.append(node("blockquote", "", quote));
+        const contexts = (scope.variant_scope?.evidence || []).filter((item) => item.asin === source.asin && item.review_id === source.review_id);
+        if (contexts.length) {
+          const why = node("details", "brief-source-details");
+          why.append(node("summary", "", "Why this review matched the variant"));
+          for (const context of contexts) why.append(node("blockquote", "", context.quote));
+          why.append(node("p", "field-help", "Exact descriptions from this review, not verified purchase metadata."));
+          entry.append(why);
+        }
         const open = button("Read source review", "text-button", () => openEvidence(source, job.options.dataset, open), "arrow");
       const footer = node("div", "evidence-source"); footer.append(node("span", "source-product-name", productName(source.asin)), node("code", "", source.asin), open); entry.append(footer); evidence.append(entry);
       }

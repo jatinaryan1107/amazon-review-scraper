@@ -17,7 +17,9 @@ Recorded checks on October 19, 2026 include an accepted 100-review report that p
 
 Core source checks and structure validation passed for those examples. They do not establish that every interpretation was supported. The optional deeper live agent received provider-level rate limits on two bounded checks and returned local evidence.
 
-The offline evaluation passes 4 statistics cases, 8 source-validation cases and 10 of 12 retrieval cases. Its reference notes are synthetic and have not been independently reviewed. Semantic accuracy has not been measured.
+The offline evaluation passes 4 statistics cases, 8 source-validation cases and 20 of 20 retrieval cases, 32 authored scenarios in total. Its reference notes are synthetic and have not been independently reviewed. Semantic accuracy has not been measured.
+
+The October 21, 2026 refinement passes 422 backend tests with one optional vault test skipped, seven Chromium journeys and syntax checks for all six frontend scripts. Product previews identify saved names and counts; research results disclose selection counts and exact variant descriptions. These checks use fictional data and fake providers; no new Amazon collection was run. Two separate fictional OpenRouter checks were also attempted. The first response repeated a citation and was rejected. After local duplicate-citation recovery was added and tested, the second attempt received a provider-level rate limit. Both retained local evidence, and no further live retry was made. The new recovery has not yet produced an accepted live verification result.
 
 ## Verification commands
 

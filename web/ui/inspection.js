@@ -14,6 +14,7 @@ window.ReviewdeskUI.createInspection = ({$, activeStatuses, average, button, cho
     setBuyingCompare(Boolean(options.asins?.[1])); $("buying-second").value = options.asins?.[1] || "";
     for (const input of document.querySelectorAll('[name="buying-priority"]')) input.checked = Boolean(options.priorities?.includes(input.value));
     $("buying-consent").checked = false;
+    updateBuyingControls();
   }
   function syncBuyingProducts() {
     const products = state.overview?.products || [], select = $("buying-suggestions");
@@ -22,12 +23,50 @@ window.ReviewdeskUI.createInspection = ({$, activeStatuses, average, button, cho
     select.dataset.products = key; state.briefRenderKey = "";
     select.replaceChildren(...products.map((product) => { const option = node("option"); option.value = product.asin; option.label = productLabel(product); return option; }));
   }
+  function inspectionAsin(value) {
+    if (/^[A-Za-z0-9]{10}$/.test(value)) return value.toUpperCase();
+    if (/[\s\\\u0000-\u001f\u007f]/.test(value)) return "";
+    const link = value.match(/^https:\/\/(?:www\.)?amazon\.in(\/[^?#]*)/i);
+    if (!link) return "";
+    const path = link[1];
+    const match = path.match(/^\/(?:[^/]+\/)?(?:dp|product-reviews)\/([A-Za-z0-9]{10})(?:\/|$)/i)
+      || path.match(/^\/portal\/customer-reviews\/([A-Za-z0-9]{10})(?:\/ref=[A-Za-z0-9_-]{1,200})?\/?$/i);
+    return match ? match[1].toUpperCase() : "";
+  }
+  function renderInspectionPreview(inputId, previewId) {
+    const preview = $(previewId), value = $(inputId).value.trim(), asin = inspectionAsin(value);
+    const product = state.overview?.products.find((item) => item.asin === asin);
+    const key = JSON.stringify([Boolean(value), asin, Boolean(state.overview), Boolean(product), state.dataset, product?.name, product?.review_count]);
+    if (preview.dataset.key === key) return;
+    preview.dataset.key = key;
+    preview.replaceChildren();
+    if (!value) {
+      preview.append(node("p", "field-help", "Choose a product to see its saved name and review count. This preview uses workspace data only."));
+      return;
+    }
+    if (!asin) {
+      preview.append(node("p", "field-help", "Use a ten-character ASIN or a full HTTPS amazon.in product link. Short links need their full product URL. The server checks the product before a run."));
+      return;
+    }
+    preview.append(node("strong", "", product ? product.name || "Name not saved" : state.overview ? "Product not saved in this workspace" : "Saved product details unavailable"), node("span", "product-id", `ASIN ${asin}`));
+    if (!state.overview) {
+      preview.append(node("p", "field-help", "Saved workspace details are unavailable. This preview does not fetch a product name or reviews."));
+    } else if (!product) {
+      preview.append(node("p", "field-help", "No saved reviews for this product in this workspace. Collect reviews or import a CSV before inspection. No live product details were fetched."));
+    } else {
+      const count = product.review_count == null ? "Saved review count unavailable." : `${plural(product.review_count, "saved review")}.`;
+      preview.append(node("p", "field-help", `${count} ${state.dataset === "demo" ? "Fictional demo sample." : "Details from this workspace, with no live product lookup."}`));
+    }
+  }
   function updateBuyingControls() {
+    renderInspectionPreview("buying-product", "buying-product-preview");
+    renderInspectionPreview("buying-second", "buying-second-preview");
     const active = state.automation?.active_job, busy = Boolean(active && activeStatuses.has(active.status));
     const router = routerStatus(), ownsJob = busy && active.kind === "brief" && active.options.dataset === state.dataset;
     $("buying-submit").disabled = !state.automation || state.mutation || busy;
     for (const input of $("buying-form").querySelectorAll("input")) input.disabled = ownsJob;
     $("buying-consent").disabled = ownsJob || !router.configured;
+    $("buying-submit-label").textContent = $("buying-consent").checked && router.configured ? "Build AI interpretation" : "Inspect saved reviews";
     $("buying-compare").disabled = ownsJob; $("buying-example").disabled = ownsJob || !state.overview?.products.length;
     $("buying-demo").disabled = busy; $("buying-ai-setup").hidden = router.configured || Boolean(state.showcase);
     const policy = state.provider?.require_zdr === true ? "Zero retention is required." : state.provider?.require_zdr === false ? "Zero retention is off; provider and account logging settings may retain shared text." : "Check the saved AI privacy settings before sharing.";
@@ -148,6 +187,7 @@ window.ReviewdeskUI.createInspection = ({$, activeStatuses, average, button, cho
     container.append(window.ReviewdeskUI.execution(job));
     const intro = node("section", "brief-result-heading");
     intro.append(node("span", "eyebrow", ai ? result.cache_hit ? "SAVED AI BUYING BRIEF" : "AI BUYING BRIEF" : "LOCAL OWNER EVIDENCE"), node("h2", "", result.products.length === 2 ? "Compare the tradeoffs" : "Your buying brief"), node("p", "muted", `Saved ${timeLabel(job.updated_at)}. Rebuild to check the latest stored evidence.`));
+    if ((result.dataset || job.options.dataset) === "demo") intro.append(node("p", "research-notice", "Fictional demo sample. These reviews illustrate the workflow and are not customer evidence."));
     const tags = node("div", "brief-tags");
     for (const priority of result.priorities.length ? result.priorities : ["overall"]) tags.append(node("span", "badge", buyingPriorityNames[priority]));
     tags.append(node("span", "badge", "CURRENT PRICE NOT CHECKED")); intro.append(tags); container.append(intro);
@@ -164,7 +204,7 @@ window.ReviewdeskUI.createInspection = ({$, activeStatuses, average, button, cho
       if (result.products.length === 2) heading.append(node("span", "badge", productIndex === 0 ? "FIRST PRODUCT" : "SECOND PRODUCT"));
       heading.append(node("h3", "", product.name || productName(product.asin)), node("span", "product-id", `ASIN ${product.asin}`));
       const currentCount = state.overview?.products.find((item) => item.asin === product.asin)?.review_count;
-      heading.append(node("p", "brief-rating", `${average(product.average_rating)} / 5 · ${plural(product.stored_reviews, "stored review")}`), node("p", "field-help", `${number(product.selected_reviews)} reviews selected for context. ${product.last_review_added_at ? `Reviews last added ${dateLabel(product.last_review_added_at)}.` : "Collection date unavailable."}`));
+      heading.append(node("p", "brief-rating", `Saved sample average: ${average(product.average_rating)} / 5 · ${plural(product.stored_reviews, "stored review")}`), node("p", "field-help", `${number(product.selected_reviews)} reviews selected for context. ${product.last_review_added_at ? `Reviews last added ${dateLabel(product.last_review_added_at)}.` : "Collection date unavailable."}`));
       panel.append(heading);
       if (currentCount != null && currentCount !== product.stored_reviews) panel.append(node("p", "research-notice", "The saved review count has changed. Rebuild this brief to include the current collection."));
       if (!product.stored_reviews || !product.selected_reviews) {
@@ -209,5 +249,6 @@ window.ReviewdeskUI.createInspection = ({$, activeStatuses, average, button, cho
       container.scrollIntoView({behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start"});
     }
   }
+  $("buying-consent").addEventListener("change", updateBuyingControls);
   return {buyingPriorityNames, buyingPriorities, setBuyingCompare, fillBuyingForm, syncBuyingProducts, updateBuyingControls, buyingChanged, startBuying, submitBuying, briefSources, briefFinding, collectForBuying, buyingComparison, renderBuying};
 };
