@@ -3,6 +3,7 @@
 import json
 import io
 import unittest
+from email.utils import formatdate
 from unittest.mock import patch
 from urllib import error
 
@@ -19,6 +20,71 @@ def completion(content='{"ok":true}', **changes):
 
 
 class ProviderTests(unittest.TestCase):
+    def test_free_router_keeps_verified_backup_and_privacy_guards(self):
+        sent = []
+        registry = self.registry(lambda payload: sent.append(payload) or completion())
+        registry.chat([{"role": "user", "content": "Fictional review"}])
+        self.assertEqual(sent[0]["models"], ["openrouter/free", "dots-studio/dots-3-note-preview:free"])
+        self.assertEqual(sent[0]["reasoning"], {"exclude": True})
+        self.assertEqual(sent[0]["provider"]["max_price"], {"prompt": 0, "completion": 0, "request": 0})
+        self.assertEqual(sent[0]["provider"]["data_collection"], "deny")
+        self.assertTrue(sent[0]["provider"]["zdr"])
+
+    def test_reasoning_compatibility_failure_has_a_safe_specific_notice(self):
+        from provider_errors import provider_failure
+        registry = self.registry(lambda payload: {"error": {"code": 400,
+            "message": "Reasoning cannot be disabled for this model. " + KEY}})
+        with self.assertRaises(ProviderError) as caught:
+            registry.chat([{"role": "user", "content": "Fictional review"}])
+        message, details = provider_failure(caught.exception)
+        self.assertEqual(details["diagnostics"]["routing_reason"], "reasoning_policy")
+        self.assertIn("reasoning setting", message)
+        self.assertNotIn(KEY, message + json.dumps(details))
+
+    def test_provider_reasoning_text_is_not_returned_as_application_output(self):
+        response = completion()
+        response["choices"][0]["message"]["reasoning"] = KEY
+        result = self.registry(lambda payload: response).chat([{"role": "user", "content": "Fictional review"}])
+        self.assertEqual(result["content"], '{"ok":true}')
+        self.assertNotIn(KEY, json.dumps(result))
+
+    def test_response_budget_exhaustion_is_distinct_from_a_rate_limit(self):
+        from provider_errors import provider_failure
+        response = completion()
+        response["choices"][0]["finish_reason"] = "length"
+        response["choices"][0]["message"]["content"] = KEY
+        with self.assertRaises(ProviderError) as caught:
+            self.registry(lambda payload: response).chat([{"role": "user", "content": "Fictional review"}])
+        message, details = provider_failure(caught.exception)
+        self.assertEqual(details["error_code"], "incomplete")
+        self.assertEqual(details["diagnostics"]["finish_reason"], "length")
+        self.assertIn("response budget", message)
+        self.assertNotIn(KEY, message + json.dumps(details))
+
+    def test_retry_after_http_date_and_lowercase_nested_headers_are_honored(self):
+        now = 1_800_000_000
+        registry = self.registry(lambda payload: {"error": {"code": 429, "metadata": {
+            "provider_name": "Fictional provider", "headers": {
+                "retry-after": formatdate(now + 90, usegmt=True),
+                "x-ratelimit-remaining": "0", "x-ratelimit-reset": str(now + 120)}}}})
+        with patch("llm_provider.time.time", return_value=now), self.assertRaises(ProviderError) as caught:
+            registry.chat([{"role": "user", "content": "Fictional review"}])
+        self.assertEqual(caught.exception.retry_after, 90)
+        self.assertEqual(caught.exception.diagnostics["remaining"], 0)
+        self.assertEqual(caught.exception.diagnostics["reset_at"], now + 120)
+        self.assertEqual(caught.exception.diagnostics["rate_limit_source"], "provider")
+        self.assertNotIn("Fictional provider", str(caught.exception.diagnostics))
+
+    def test_retry_dates_are_bounded_and_expired_hints_do_not_create_a_future_wait(self):
+        from llm_provider import _retry_delay
+        now = 1_800_000_000
+        with patch("llm_provider.time.time", return_value=now):
+            self.assertEqual(_retry_delay(formatdate(now - 60, usegmt=True)), 0)
+            self.assertIsNone(_retry_delay(formatdate(now + 86401, usegmt=True)))
+            for raw in (True, None, "not a date", "x" * 129, "NaN", "Infinity"):
+                with self.subTest(raw=raw):
+                    self.assertIsNone(_retry_delay(raw))
+
     def test_citation_failure_reasons_are_specific_without_exposing_model_content(self):
         from job_manager import provider_failure
         for reason, phrase in [("unknown_passage", "not supplied"),
@@ -178,7 +244,7 @@ class ProviderTests(unittest.TestCase):
                                                "max_price": {"prompt": 0, "completion": 0, "request": 0}})
         self.assertEqual(payload["plugins"], [{"id": "context-compression", "enabled": False}, {"id": "response-healing"}])
         self.assertEqual(payload["temperature"], 0)
-        self.assertEqual(payload["reasoning"], {"enabled": False})
+        self.assertEqual(payload["reasoning"], {"exclude": True})
         self.assertNotIn(KEY, json.dumps(payload))
         self.assertEqual(result["model"], "fictional/model:free")
         self.assertEqual(result["usage"]["input_tokens"], 10)

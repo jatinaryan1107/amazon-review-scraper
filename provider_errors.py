@@ -57,10 +57,13 @@ def provider_failure(error):
         message = "The model provider is limiting requests. Your daily OpenRouter allowance may still be available."
     elif code == "rate_limit" and details.get("rate_limit_source") == "openrouter":
         message = "OpenRouter blocked this request under a platform rate limit. Check the account counter and reset details."
+    elif code == "incomplete" and details.get("finish_reason") == "length":
+        message = "The model reached its response budget before finishing. Ask a narrower question; local evidence remains available."
     if code in {"unavailable", "invalid_request"}:
         message = {
             "privacy_policy": "OpenRouter reported a data-policy routing restriction. Check account and key policies before another run.",
             "required_parameters": "OpenRouter reported no route supporting the required parameters. Review the response format and requested features.",
+            "reasoning_policy": "A free model route does not support the requested reasoning setting. Local evidence remains available.",
             "region_policy": "OpenRouter reported a region routing restriction. Review the account and provider region requirements.",
             "model_unavailable": "OpenRouter reported that the requested model is unavailable.",
             "no_matching_endpoint": "OpenRouter reported no matching endpoint, without identifying which requirement excluded it.",
