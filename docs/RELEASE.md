@@ -30,7 +30,7 @@ python -m evaluations.run --output evaluation-report.json
 python -m unittest discover -s browser_tests -v
 ```
 
-Browser tests require the pinned Playwright dependency and Chromium. Tests use fictional reviews and injected provider responses. The optional real Windows credential round trip is separate and skipped by default. See the usage guide for its prerequisites.
+Browser tests require the pinned Playwright dependency and Chromium. The browser CI job uses Ubuntu 24.04 because the pinned Playwright release does not support the newer Ubuntu image behind `ubuntu-latest`. The standard-library test matrix still exercises the current Windows and Ubuntu runners. Tests use fictional reviews and injected provider responses. The optional real Windows credential round trip is separate and skipped by default. See the usage guide for its prerequisites.
 
 ## Recovery and boundaries
 
