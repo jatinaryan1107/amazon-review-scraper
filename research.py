@@ -291,7 +291,7 @@ def _local_result(engine, question, scope, fingerprint, selected, exposed, retri
 
 
 def ask_reviews(engine, rows, question, *, dataset, asin, allow_external=True, strategy="focused", cancelled=None, on_progress=None):
-    from llm_analysis import _hash, _local_intent, _model_json
+    from llm_analysis import MAX_OUTPUT_TOKENS, _hash, _local_intent, _model_json
     if not isinstance(question, str) or not question.strip() or len(question) > 1500:
         raise AnalysisError("Ask a question using 1 to 1,500 characters.")
     if not isinstance(strategy, str) or strategy not in {"focused", "agent"} or type(allow_external) is not bool:
@@ -340,7 +340,7 @@ def ask_reviews(engine, rows, question, *, dataset, asin, allow_external=True, s
                 "Every review claim must be supported by the cited passages. Use plain language without long dashes.")
             messages = [{"role": "system", "content": instructions},
                         {"role": "user", "content": json.dumps({"question": question, "review_evidence": wire}, ensure_ascii=False)}]
-            payload = chat_payload(messages, schema=schema, require_zdr=policy["require_zdr"], response_mode=policy["response_mode"], max_tokens=1000)
+            payload = chat_payload(messages, schema=schema, require_zdr=policy["require_zdr"], response_mode=policy["response_mode"], max_tokens=MAX_OUTPUT_TOKENS)
             if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > 200_000:
                 raise ProviderError("The selected evidence exceeded the research context budget.", code="invalid_request")
             response = engine._call(messages, schema, usage, identity, cancelled=cancelled)

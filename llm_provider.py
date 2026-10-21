@@ -9,6 +9,8 @@ import threading
 import time
 import re
 from decimal import Decimal, InvalidOperation
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from collections.abc import Mapping
 from urllib import error, request
 
@@ -17,12 +19,12 @@ from review_analysis import AnalysisCancelled, AnalysisError
 
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 QUOTA_ENDPOINT = "https://openrouter.ai/api/v1/key"
-MODEL = "xingchen-agi/xing4.0-29b-a4b:free"
-FALLBACK_MODEL = "openrouter/free"
+MODEL = "openrouter/free"
+FALLBACK_MODEL = "dots-studio/dots-3-note-preview:free"
 MAX_BYTES = 1024 * 1024
 RESPONSE_BUDGET_SECONDS = 120
 RESPONSE_MODES = {"prompt", "schema"}
-ROUTING_REASONS = {"privacy_policy", "required_parameters", "model_unavailable", "region_policy", "no_matching_endpoint"}
+ROUTING_REASONS = {"privacy_policy", "required_parameters", "model_unavailable", "region_policy", "no_matching_endpoint", "reasoning_policy"}
 
 
 class ProviderError(AnalysisError):
@@ -50,6 +52,9 @@ def public_diagnostics(value):
     source = value.get("rate_limit_source")
     if isinstance(source, str) and source in {"openrouter", "provider", "unknown"}:
         safe["rate_limit_source"] = source
+    finish = value.get("finish_reason")
+    if isinstance(finish, str) and finish in {"length", "content_filter"}:
+        safe["finish_reason"] = finish
     for field, low, high in [("http_status", 100, 599), ("error_status", 100, 599),
                              ("provider_code", 100, 599), ("limit", 0, 10_000_000),
                              ("remaining", 0, 10_000_000), ("reset_at", 1, 4_102_444_800)]:
@@ -57,6 +62,36 @@ def public_diagnostics(value):
         if type(number) is int and low <= number <= high:
             safe[field] = number
     return safe
+
+
+def _header_value(headers, name):
+    """HTTP header names remain case insensitive inside JSON metadata too."""
+    try:
+        value = headers.get(name)
+        if value is not None:
+            return value
+        return next((value for key, value in headers.items()
+                     if isinstance(key, str) and key.casefold() == name.casefold()), None)
+    except (AttributeError, TypeError):
+        return None
+
+
+def _retry_delay(raw):
+    if isinstance(raw, bool):
+        return None
+    try:
+        number = float(raw)
+    except (ValueError, TypeError):
+        if not isinstance(raw, str) or len(raw) > 128:
+            return None
+        try:
+            date = parsedate_to_datetime(raw)
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=timezone.utc)
+            number = max(0, date.timestamp() - time.time())
+        except (ValueError, TypeError, OverflowError):
+            return None
+    return number if math.isfinite(number) and 0 <= number <= 86400 else None
 
 
 def _error_diagnostics(status, failure=None, headers=None, http_status=None):
@@ -77,6 +112,8 @@ def _error_diagnostics(status, failure=None, headers=None, http_status=None):
                 safe["routing_reason"] = reason
             elif message.startswith(("no available models", "model not found", "no such model")):
                 safe["routing_reason"] = "model_unavailable"
+            elif "reasoning" in message and "cannot" in message and "disabl" in message:
+                safe["routing_reason"] = "reasoning_policy"
     if status != 429:
         return public_diagnostics(safe)
     safe["rate_limit_source"] = "unknown"
@@ -95,9 +132,9 @@ def _error_diagnostics(status, failure=None, headers=None, http_status=None):
     headers = headers or {}
     for header, field in [("X-RateLimit-Limit", "limit"), ("X-RateLimit-Remaining", "remaining"),
                           ("X-RateLimit-Reset", "reset_at")]:
-        raw = headers.get(header)
+        raw = _header_value(headers, header)
         if not isinstance(raw, str):
-            raw = nested_headers.get(header)
+            raw = _header_value(nested_headers, header)
         if type(raw) is int:
             raw = str(raw)
         if not isinstance(raw, str) or not re.fullmatch(r"[0-9]{1,13}", raw):
@@ -116,20 +153,12 @@ def _raise_provider_error(status, *, failure=None, headers=None, http_status=Non
     code = {400: "invalid_request", 401: "authorization", 402: "budget", 403: "authorization",
             404: "unavailable", 429: "rate_limit", 500: "unavailable", 502: "unavailable",
             503: "unavailable"}.get(status, "invalid_response") if type(status) is int else "invalid_response"
-    retry_after = None
-    try:
-        raw = (headers or {}).get("Retry-After")
-        if raw is None and isinstance(failure, Mapping):
-            metadata = failure.get("metadata")
-            nested = metadata.get("headers") if isinstance(metadata, Mapping) else None
-            raw = nested.get("Retry-After", "") if isinstance(nested, Mapping) else ""
-        if isinstance(raw, bool):
-            raise ValueError("Invalid retry hint")
-        number = float(raw)
-        if math.isfinite(number) and 0 <= number <= 86400:
-            retry_after = number
-    except (ValueError, TypeError):
-        pass
+    raw = _header_value(headers, "Retry-After")
+    if raw is None and isinstance(failure, Mapping):
+        metadata = failure.get("metadata")
+        nested = metadata.get("headers") if isinstance(metadata, Mapping) else None
+        raw = _header_value(nested, "Retry-After")
+    retry_after = _retry_delay(raw)
     raise ProviderError("The provider did not complete this request.", code=code, retry_after=retry_after,
                         diagnostics=_error_diagnostics(status, failure, headers, http_status))
 
@@ -175,7 +204,7 @@ def chat_payload(messages, *, schema=None, tools=None, require_tool=False, max_t
             messages.insert(0, {"role": "system", "content": instruction})
     payload = {"models": [MODEL, FALLBACK_MODEL], "messages": messages, "stream": False, "max_tokens": max_tokens,
                "temperature": 0,
-               "reasoning": {"enabled": False},
+               "reasoning": {"exclude": True},
                "provider": {"require_parameters": True, "data_collection": "deny",
                             "max_price": {"prompt": 0, "completion": 0, "request": 0}},
                "plugins": [{"id": "context-compression", "enabled": False}]}
@@ -489,7 +518,8 @@ class ProviderRegistry:
                 raise ProviderError("The provider returned an invalid answer.", code="invalid_response")
             choice = choices[0]
             if choice.get("finish_reason") not in {"stop", "tool_calls"}:
-                raise ProviderError("The provider did not finish its answer. No partial output was accepted.", code="incomplete")
+                raise ProviderError("The provider did not finish its answer. No partial output was accepted.", code="incomplete",
+                                    diagnostics={"finish_reason": choice.get("finish_reason")})
             message = choice.get("message")
             if not isinstance(message, Mapping):
                 raise ProviderError("The provider returned an invalid message.", code="invalid_response")

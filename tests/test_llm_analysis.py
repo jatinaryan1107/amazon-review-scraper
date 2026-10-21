@@ -406,8 +406,8 @@ class EngineTests(unittest.TestCase):
             engine.analyse([review()], dataset="workspace", asin="")
         self.assertEqual(caught.exception.code, "incomplete")
         self.assertEqual(len(sent), 1)
-        self.assertEqual(sent[0]["max_tokens"], 1000)
-        self.assertEqual(sent[0]["reasoning"], {"enabled": False})
+        self.assertEqual(sent[0]["max_tokens"], 2500)
+        self.assertEqual(sent[0]["reasoning"], {"exclude": True})
         self.assertEqual(engine.plan([review()])["chunks_cached"], 0)
         self.assertEqual(self.store.daily_remaining(), 49)
 

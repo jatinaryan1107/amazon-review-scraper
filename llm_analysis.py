@@ -17,7 +17,7 @@ from review_analysis import (AnalysisCancelled, AnalysisError, _base_report,
 ENGINE_VERSION = 8
 MAX_CALLS = 30
 MAX_CHARS = 24_000
-MAX_OUTPUT_TOKENS = 1000
+MAX_OUTPUT_TOKENS = 2500
 MAX_BATCH_BYTES = 200_000
 MAX_BATCH_ENTRIES = 1000
 LOCAL_QUESTIONS = {

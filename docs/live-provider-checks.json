@@ -1,0 +1,74 @@
+{
+  "checked_on": "2026-10-22",
+  "data": "fictional",
+  "scenario": "Battery-life question about North Desk Fan in the demo dataset",
+  "route": {
+    "primary": "openrouter/free",
+    "backup": "dots-studio/dots-3-note-preview:free",
+    "free_only": true,
+    "training_use": "deny",
+    "require_zdr": false,
+    "response_mode": "schema",
+    "reasoning_output": "excluded",
+    "total_response_token_limit": 2500
+  },
+  "live": {
+    "method": "openrouter",
+    "elapsed_seconds": 13.477,
+    "usage": {
+      "calls": 1,
+      "cached_chunks": 0,
+      "input_tokens": 349,
+      "output_tokens": 1744,
+      "models": [
+        "recursive/flint-v1.0:free"
+      ],
+      "usage_available": true,
+      "cost": 0.0
+    },
+    "answer": "The supplied reviews say battery life is a concern. One says the battery only lasts through half a work session, and another says the device needs to be recharged more often than expected.",
+    "evidence": [
+      {
+        "asin": "B0DEMO0001",
+        "review_id": "DEMO-001-02",
+        "quote": "Synthetic demo: short battery life",
+        "quotes": [
+          "Synthetic demo: short battery life",
+          "Fictional review: airflow is strong but the battery only lasts through half my work session."
+        ]
+      },
+      {
+        "asin": "B0DEMO0001",
+        "review_id": "DEMO-001-05",
+        "quote": "Synthetic demo: battery concern",
+        "quotes": [
+          "Synthetic demo: battery concern",
+          "Fictional review: the fan looks neat and cools well. I need to recharge it more often than expected."
+        ]
+      }
+    ],
+    "scope": {
+      "total_reviews": 5,
+      "matched_reviews": 3,
+      "retrieved_reviews": 3
+    }
+  },
+  "repeat": {
+    "cache_hit": true,
+    "elapsed_seconds": 0.067,
+    "usage": {
+      "calls": 0,
+      "cached_chunks": 1,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "models": [],
+      "usage_available": true,
+      "cost": 0.0
+    }
+  },
+  "limitations": [
+    "These are individual observations, not an availability or latency benchmark.",
+    "Source passages passed application checks; independent human semantic review remains pending.",
+    "Free provider capacity, supported parameters and model availability can change."
+  ]
+}

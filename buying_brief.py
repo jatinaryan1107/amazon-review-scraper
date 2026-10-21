@@ -4,7 +4,7 @@ import json
 import re
 import sqlite3
 
-from llm_analysis import _hash, _hydrate_evidence, _model_json, _wire_chunk
+from llm_analysis import MAX_OUTPUT_TOKENS, _hash, _hydrate_evidence, _model_json, _wire_chunk
 from llm_provider import ProviderError, _cancel, chat_payload
 from research import _notice, _tokens
 from review_analysis import AnalysisCancelled
@@ -205,7 +205,7 @@ def build_brief(engine, rows, *, dataset, products, priorities, allow_external=F
                 "Attribute claims to selected owner reports, not established specifications or universal facts. Output only the requested JSON. Use plain language without long dashes.")
             messages = [{"role": "system", "content": instructions}, {"role": "user", "content": json.dumps({
                 "priorities": topics, "products": list(mapping), "shared_review_ids": overlap, "review_evidence": wire}, ensure_ascii=False)}]
-            payload = chat_payload(messages, schema=schema, require_zdr=policy["require_zdr"], response_mode=policy["response_mode"], max_tokens=1000)
+            payload = chat_payload(messages, schema=schema, require_zdr=policy["require_zdr"], response_mode=policy["response_mode"], max_tokens=MAX_OUTPUT_TOKENS)
             if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > 200_000:
                 raise ProviderError("The buying evidence exceeded its request budget.", code="invalid_request")
             if on_progress:
