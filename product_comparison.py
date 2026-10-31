@@ -5,7 +5,7 @@ import re
 import sqlite3
 import time
 
-from llm_analysis import _hash, _hydrate_evidence, _model_json, _wire_chunk
+from llm_analysis import MAX_OUTPUT_TOKENS, _hash, _hydrate_evidence, _model_json, _wire_chunk
 from llm_provider import ProviderError, _cancel, chat_payload
 from research import _notice
 from review_analysis import AnalysisCancelled
@@ -276,7 +276,7 @@ def compare_products(engine, rows, *, dataset, products, allow_external=False, n
                 "Include all corresponding p1_concern and p2 fields. Examples are shapes only: replace them with supported claims and actual source labels. Close all brackets correctly.")
             messages = [{"role": "system", "content": instructions}, {"role": "user", "content": json.dumps({
                 "products": descriptors, "shared_review_ids": overlap, **({"decision_focus": focus} if focus else {}), "review_evidence": wire}, ensure_ascii=False)}]
-            payload = chat_payload(messages, schema=schema, require_zdr=policy["require_zdr"], response_mode=policy["response_mode"], max_tokens=1000)
+            payload = chat_payload(messages, schema=schema, require_zdr=policy["require_zdr"], response_mode=policy["response_mode"], max_tokens=MAX_OUTPUT_TOKENS)
             if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > 200000:
                 raise ProviderError("Comparison evidence exceeded its request budget.", code="invalid_request")
             if on_progress:

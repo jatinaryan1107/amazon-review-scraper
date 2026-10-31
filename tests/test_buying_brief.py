@@ -89,7 +89,7 @@ class BuyingBriefTests(unittest.TestCase):
         self.assertEqual(len(result["tradeoffs"]), 1)
         payload = sent[0]
         self.assertNotIn("tools", payload)
-        self.assertEqual(payload["max_tokens"], 1000)
+        self.assertEqual(payload["max_tokens"], 2500)
         self.assertEqual(payload["provider"]["data_collection"], "deny")
         self.assertEqual(payload["provider"]["max_price"], {"prompt": 0, "completion": 0, "request": 0})
         for private in [A, B, "PRIVATE", "www.amazon.in", "synthetic-buying-key"]:

@@ -1115,6 +1115,7 @@
     if (usage?.usage_available !== false && usage?.input_tokens != null) facts.push(`${number(usage.input_tokens)} input tokens`);
     if (usage?.usage_available !== false && usage?.output_tokens != null) facts.push(`${number(usage.output_tokens)} output tokens`);
     if (facts.length) section.append(node("p", "", facts.join(" · ")));
+    if (Number(usage?.output_tokens) > 0) section.append(node("p", "usage-models", "Provider output counts can include internal model reasoning as well as the answer."));
     const models = Array.isArray(usage?.models) ? [...new Set(usage.models)] : [];
     if (models.length) section.append(node("p", "usage-models", `Model${models.length === 1 ? "" : "s"} returned: ${models.join(", ")}`));
     else if (model) section.append(node("p", "usage-models", Number(usage?.cached_chunks) > 0 ? `Model used for the saved answer: ${model}` : `Configured model route: ${model}`));

@@ -46,3 +46,5 @@ Focused responses can repeat the same passage label. The app collapses exact rep
 ## Walk through the code
 
 Start with `_terms`, `_variant_scope` and `retrieve` in `research.py`. Follow a local question into `_local_result`, then inspect the optional provider branch in `ask_reviews`. Explain why each exclusion happened and which exact text reached the model. For an interview, change one fixture and predict the result before running it.
+
+A focused website check on October 22, 2026 accepted a real free-model answer and its cached repeat used zero requests. [The recorded check](live-provider-checks.json) contains fictional evidence only. Exact duplicate-citation handling remains covered by fake-provider regression tests; one successful live answer is not a general reliability benchmark.
